@@ -1,0 +1,10 @@
+# headless build: we render through PyQt6, never cv2.imshow.
+# The full opencv-python bundles Qt plugins that clash with PyQt6 (crash on startup).
+opencv-python-headless==4.11.0.86
+pyvirtualcam==0.12.0
+PyQt6==6.7.1
+PyQt6-WebEngine==6.7.0  # embeds the monster info site page
+easyocr==1.7.2
+PyYAML==6.0.2
+numpy>=1.26  # numpy 2.x works with the CUDA torch build; see README GPU section
+pygrabber==0.2  # DirectShow device friendly-name enumeration (Windows)

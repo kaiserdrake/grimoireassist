@@ -1,0 +1,14 @@
+[
+  {
+    "id": "mhs3",
+    "name": "MH Stories 3: Twisted Reflection",
+    "site_url_template": "https://monsterbuddy.app/3/monsters/{name}",
+    "monsters": "monsters_3"
+  },
+  {
+    "id": "mhs2",
+    "name": "MH Stories 2: Wings of Ruin",
+    "site_url_template": "https://monsterbuddy.app/2/monsters/{name}",
+    "monsters": "monsters_2"
+  }
+]

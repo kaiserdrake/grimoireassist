@@ -1,0 +1,27 @@
+selected_game: mhs3
+capture:
+  device_index: 1
+  width: 1920
+  height: 1080
+  fps: 30
+  video_file: __none__.mp4
+virtual_camera:
+  enabled: true
+ocr:
+  engine: easyocr
+  poll_fps: 3.0
+  languages:
+  - en
+  gpu: false
+  debounce_frames: 3
+  continuous: true
+ui:
+  always_on_top: false
+games:
+  mhs3:
+    regions:
+      monster_names:
+      - x: 217
+        y: 21
+        w: 1665
+        h: 136
