@@ -58,6 +58,13 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._refresh_status)
         self._timer.start(500)
 
+        self._idle_secs: int = 0          # seconds elapsed with no monsters
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setInterval(1000)
+        self._idle_timer.timeout.connect(self._on_idle_tick)
+        # Panel is built by _start_game above, so we can start counting right away.
+        self._start_idle()
+
     # ================= per-game lifecycle =================
     def _start_game(self, game: Optional[GameInfo]) -> None:
         if game is None:
@@ -73,7 +80,7 @@ class MainWindow(QMainWindow):
         # (re)build panel for this game's site + slugs
         self.model = OverlayModel()
         if self.cfg.ocr.continuous:
-            self.model.status_text = "Watching OCR area…"
+            self.model.status_text = "Tracking areas..."
         self.panel = MonsterPanel(game.site_url_template, slug_map=slug_map(game.monsters))
         self.setCentralWidget(self.panel)
         self._refresh_panel()
@@ -121,12 +128,28 @@ class MainWindow(QMainWindow):
         self.act_on_top.setCheckable(True)
         self.act_on_top.setChecked(self.cfg.ui.always_on_top)
         self.act_on_top.toggled.connect(self._toggle_on_top)
+        self.act_fullscreen = self.menu.addAction("Fullscreen\tF11")
+        self.act_fullscreen.setCheckable(True)
+        self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
         self.menu.addSeparator()
         self.menu.addAction("Switch game…", self._switch_game)
         self.menu.aboutToShow.connect(self._populate_camera_menu)
 
         self.menu_btn.setMenu(self.menu)
         tb.addWidget(self.menu_btn)
+
+        tb.addSeparator()
+
+        self.grimoire_btn = QToolButton()
+        self.grimoire_btn.setText("\U0001f52e")
+        self.grimoire_btn.setToolTip("Toggle Grimoire tracker")
+        self.grimoire_btn.setCheckable(True)
+        self.grimoire_btn.setStyleSheet(
+            "QToolButton { font-size:16px; padding:2px 32px; }"
+            "QToolButton:checked { background:#5b3fa6; border-radius:4px; color:#fff; }"
+        )
+        self.grimoire_btn.clicked.connect(self._toggle_grimoire)
+        tb.addWidget(self.grimoire_btn)
 
     def _populate_camera_menu(self) -> None:
         self.camera_menu.clear()
@@ -150,7 +173,8 @@ class MainWindow(QMainWindow):
         self._update_vcam_label()
 
     def _build_shortcuts(self) -> None:
-        QShortcut(QKeySequence(Qt.Key.Key_F9), self, activated=self._open_calibration)
+        QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
+        QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
 
     # ================= camera =================
     def _switch_device(self, device_index: int) -> None:
@@ -192,6 +216,28 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(flags)
         self.show()
 
+    # ================= grimoire toggle =================
+    def _toggle_grimoire(self, checked: bool) -> None:
+        self._set_grimoire(checked)
+        if checked:
+            self._cancel_idle()
+        elif not self.model.monsters:
+            self._start_idle()
+
+    # ================= fullscreen =================
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        self.act_fullscreen.setChecked(self.isFullScreen())
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.act_fullscreen.setChecked(self.isFullScreen())
+
     def _update_vcam_label(self) -> None:
         if not self.vcam:
             self._vcam_label.setText("Virtual cam: off")
@@ -227,12 +273,55 @@ class MainWindow(QMainWindow):
         if self.cfg.ocr.continuous:
             self.model.in_battle = bool(names)
             self.model.status_text = (
-                f"{len(names)} detected" if names else "Watching OCR area…")
+                f"{len(names)} detected" if names else "Tracking areas...")
         self._refresh_panel()
+        if names:
+            self._cancel_idle()
+            # monsters detected — switch back to OCR view
+            self._set_grimoire(False)
+        else:
+            self._start_idle()
 
     def _on_monster_killed(self, name: str) -> None:
         self.model.remove_monster(name)
         self._refresh_panel()
+        if not self.model.monsters:
+            self._start_idle()
+
+    # ================= idle / auto-switch =================
+    _IDLE_TIMEOUT = 7
+
+    def _start_idle(self) -> None:
+        if not self._idle_timer.isActive():
+            self._idle_secs = 0
+            self._idle_timer.start()
+            self._update_countdown()
+
+    def _cancel_idle(self) -> None:
+        self._idle_timer.stop()
+        self._idle_secs = 0
+        if self.panel:
+            self.panel.set_countdown(None)
+
+    def _on_idle_tick(self) -> None:
+        self._idle_secs += 1
+        if self._idle_secs >= self._IDLE_TIMEOUT:
+            self._idle_timer.stop()
+            if self.panel:
+                self.panel.set_countdown(None)
+            self._set_grimoire(True)
+        else:
+            self._update_countdown()
+
+    def _update_countdown(self) -> None:
+        if self.panel:
+            remaining = self._IDLE_TIMEOUT - self._idle_secs
+            self.panel.set_countdown(remaining)
+
+    def _set_grimoire(self, visible: bool) -> None:
+        self.grimoire_btn.setChecked(visible)
+        if self.panel:
+            self.panel.set_grimoire_visible(visible)
 
     # ================= calibration =================
     def _open_calibration(self) -> None:

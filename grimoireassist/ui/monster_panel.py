@@ -3,6 +3,10 @@
 A row of buttons (one per detected monster name) sits above an embedded web view
 that loads `<url_template>` for the selected monster. When the OCR area is empty
 the view is cleared.
+
+The Grimoire view (index 1 in the stack) is toggled by the toolbar button in
+MainWindow via set_grimoire_visible(). Auth cookies are stored in a persistent
+QWebEngineProfile so the user stays logged in between sessions.
 """
 from __future__ import annotations
 
@@ -11,14 +15,59 @@ from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     _HAVE_WEBENGINE = True
 except Exception:  # pragma: no cover - WebEngine missing
     _HAVE_WEBENGINE = False
+
+GRIMOIRE_URL = "https://grimoire.laeradsphere.com/"
+_GRIMOIRE_PROFILE_NAME = "grimoire_persistent"
+
+
+def _inject_rotate_fix(page) -> None:
+    """Strip the 180° rotation from the grimoire drawer pull-tabs.
+    QtWebEngine misrenders writing-mode + any 180° rotation (shows mirrored/upside-down).
+    Removing the rotation leaves writing-mode: vertical-rl which renders the text
+    correctly sideways. Regular Chrome is unaffected — this script only runs in the app."""
+    from PyQt6.QtWebEngineCore import QWebEngineScript
+    css = (
+        ".notes-toc-pull {"
+        "  writing-mode: horizontal-tb !important;"
+        "  text-orientation: unset !important;"
+        "  white-space: nowrap !important;"
+        "  width: 80px !important;"
+        "  height: 16px !important;"
+        "  right: -32px !important;"
+        "  transform: translateY(-50%) rotate(-90deg) !important;"
+        "}"
+        ".recent-drawer-pull {"
+        "  writing-mode: horizontal-tb !important;"
+        "  text-orientation: unset !important;"
+        "  white-space: nowrap !important;"
+        "  width: 80px !important;"
+        "  height: 16px !important;"
+        "  margin: 32px -32px 0 -32px !important;"
+        "  align-self: flex-start !important;"
+        "  transform: rotate(-90deg) !important;"
+        "}"
+    )
+    script = QWebEngineScript()
+    script.setName("grimoire-rotate-fix")
+    script.setSourceCode(
+        "(function(){"
+        "  var s = document.createElement('style');"
+        f"  s.textContent = {css!r};"
+        "  document.head.appendChild(s);"
+        "})();"
+    )
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+    page.scripts().insert(script)
 
 
 def to_slug(name: str) -> str:
@@ -54,9 +103,16 @@ class MonsterPanel(QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        self.status_label = QLabel("Watching OCR area…")
+        self.status_label = QLabel("Tracking areas...")
         self.status_label.setStyleSheet("font-size:14px; font-weight:600; color:#6b6b75;")
         outer.addWidget(self.status_label)
+
+        self._countdown_label = QLabel()
+        self._countdown_label.setStyleSheet(
+            "font-size:11px; color:#5a5a63; padding:2px 0;"
+        )
+        self._countdown_label.setVisible(False)
+        outer.addWidget(self._countdown_label)
 
         # row of monster-name buttons
         self._btn_row = QHBoxLayout()
@@ -64,17 +120,54 @@ class MonsterPanel(QWidget):
         self._btn_row.addStretch(1)
         outer.addLayout(self._btn_row)
 
-        # embedded page
+        # stacked web area: index 0 = monster view, index 1 = grimoire view
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack, 1)
+
         if _HAVE_WEBENGINE:
             self.web = QWebEngineView()
             self.web.setHtml(_BLANK_HTML)
-            outer.addWidget(self.web, 1)
+            self._stack.addWidget(self.web)  # index 0
+
+            # persistent profile keeps cookies/localStorage between app sessions
+            self._grimoire_profile = QWebEngineProfile(_GRIMOIRE_PROFILE_NAME)
+            self._grimoire_profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies
+            )
+            self._grimoire_web = QWebEngineView()
+            grimoire_page = QWebEnginePage(self._grimoire_profile, self._grimoire_web)
+            self._grimoire_web.setPage(grimoire_page)
+            _inject_rotate_fix(grimoire_page)
+            self._grimoire_web.setUrl(QUrl(GRIMOIRE_URL))
+            self._stack.addWidget(self._grimoire_web)  # index 1
         else:
             self.web = None
-            self._fallback = QLabel("PyQt6-WebEngine not installed — cannot embed page.")
-            self._fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._fallback.setStyleSheet("color:#c66;")
-            outer.addWidget(self._fallback, 1)
+            self._grimoire_web = None
+            self._grimoire_profile = None
+            fallback = QLabel("PyQt6-WebEngine not installed — cannot embed page.")
+            fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fallback.setStyleSheet("color:#c66;")
+            self._stack.addWidget(fallback)
+
+    # -- grimoire toggle (called by MainWindow toolbar button) -----------
+    def set_grimoire_visible(self, visible: bool) -> None:
+        self._stack.setCurrentIndex(1 if visible else 0)
+
+    def set_countdown(self, seconds: Optional[int]) -> None:
+        """Show a countdown label. Pass None to hide it."""
+        if seconds is None:
+            self._countdown_label.setVisible(False)
+        else:
+            self._countdown_label.setText(
+                f"Transitioning view in {seconds}s of no object detected"
+            )
+            self._countdown_label.setVisible(True)
+
+    def open_grimoire_url(self, url: str) -> None:
+        """Navigate the grimoire view to a URL and bring it to front (for OCR results)."""
+        if self._grimoire_web is not None:
+            self._grimoire_web.setUrl(QUrl(url))
+        self.set_grimoire_visible(True)
 
     # -- updates ---------------------------------------------------------
     def set_status(self, text: str, active: bool) -> None:

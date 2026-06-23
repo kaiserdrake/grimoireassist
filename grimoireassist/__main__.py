@@ -40,7 +40,116 @@ def main(argv: list[str] | None = None) -> int:
 
     # Import Qt lazily so --list-devices works without a display.
     from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor, QPalette
     from PyQt6.QtWidgets import QApplication
+
+    def _apply_dark_theme(app: QApplication) -> None:
+        app.setStyle("Fusion")
+        p = QPalette()
+        # backgrounds
+        p.setColor(QPalette.ColorRole.Window,          QColor("#15151b"))
+        p.setColor(QPalette.ColorRole.Base,            QColor("#1e1e28"))
+        p.setColor(QPalette.ColorRole.AlternateBase,   QColor("#1a1a24"))
+        p.setColor(QPalette.ColorRole.ToolTipBase,     QColor("#2a2a36"))
+        # text
+        p.setColor(QPalette.ColorRole.WindowText,      QColor("#e8e8ec"))
+        p.setColor(QPalette.ColorRole.Text,            QColor("#e8e8ec"))
+        p.setColor(QPalette.ColorRole.ToolTipText,     QColor("#e8e8ec"))
+        p.setColor(QPalette.ColorRole.PlaceholderText, QColor("#6b6b75"))
+        # buttons
+        p.setColor(QPalette.ColorRole.Button,          QColor("#2a2a36"))
+        p.setColor(QPalette.ColorRole.ButtonText,      QColor("#e8e8ec"))
+        # highlights
+        p.setColor(QPalette.ColorRole.Highlight,       QColor("#5b3fa6"))
+        p.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        # disabled state
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor("#4a4a55"))
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       QColor("#4a4a55"))
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor("#4a4a55"))
+        app.setPalette(p)
+        app.setStyleSheet("""
+            QMainWindow, QDialog {
+                background: #15151b;
+            }
+            QToolBar {
+                background: #1a1a24;
+                border-bottom: 1px solid #2a2a36;
+                spacing: 2px;
+            }
+            QToolButton {
+                background: transparent;
+                color: #e8e8ec;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 16px;
+            }
+            QToolButton:hover  { background: #2a2a36; }
+            QToolButton:pressed { background: #3a3a50; }
+            QMenuBar {
+                background: #1a1a24;
+                color: #e8e8ec;
+            }
+            QMenuBar::item:selected { background: #2a2a36; }
+            QMenu {
+                background: #1e1e28;
+                color: #e8e8ec;
+                border: 1px solid #2a2a36;
+            }
+            QMenu::item:selected { background: #5b3fa6; color: #fff; }
+            QMenu::separator { height: 1px; background: #2a2a36; margin: 4px 8px; }
+            QStatusBar {
+                background: #1a1a24;
+                color: #6b6b75;
+                border-top: 1px solid #2a2a36;
+                font-size: 11px;
+            }
+            QStatusBar QLabel { color: #6b6b75; }
+            QScrollBar:vertical {
+                background: #1e1e28; width: 8px; margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #3a3a50; border-radius: 4px; min-height: 20px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #1e1e28; height: 8px; margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #3a3a50; border-radius: 4px; min-width: 20px;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QMessageBox { background: #15151b; color: #e8e8ec; }
+            QMessageBox QLabel { color: #e8e8ec; }
+            QPushButton {
+                background: #2a2a36; border: none; border-radius: 6px;
+                padding: 6px 16px; color: #e8e8ec;
+            }
+            QPushButton:hover   { background: #3a3a50; }
+            QPushButton:pressed { background: #5b3fa6; }
+            QPushButton:default {
+                background: #5b3fa6; color: #fff; font-weight: 600;
+            }
+            QComboBox {
+                background: #2a2a36; color: #e8e8ec;
+                border: 1px solid #3a3a50; border-radius: 4px; padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView {
+                background: #1e1e28; color: #e8e8ec;
+                selection-background-color: #5b3fa6;
+            }
+            QSpinBox {
+                background: #2a2a36; color: #e8e8ec;
+                border: 1px solid #3a3a50; border-radius: 4px; padding: 2px 6px;
+            }
+            QLabel { color: #e8e8ec; }
+            QCheckBox { color: #e8e8ec; }
+            QCheckBox::indicator {
+                width: 14px; height: 14px;
+                border: 1px solid #3a3a50; border-radius: 3px; background: #2a2a36;
+            }
+            QCheckBox::indicator:checked { background: #5b3fa6; border-color: #5b3fa6; }
+        """)
     # QtWebEngine (embedded monster page) wants shared OpenGL contexts, set
     # before the QApplication is created.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
@@ -49,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
+    _apply_dark_theme(app)
 
     # Show the game-select page when no valid game is selected yet.
     if get_game(cfg.selected_game) is None:

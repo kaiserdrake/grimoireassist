@@ -6,35 +6,45 @@ machine. It:
 1. **Re-publishes** the capture feed as a **virtual camera** (OBS Virtual Camera) so other apps
    (OBS, Discord, browsers, etc.) can use the same source **in parallel** — the virtual feed is
    **clean** (no overlays).
-2. **Displays** the live feed in its own window with overlays.
-3. **Runs OCR** on fixed UI regions to drive a battle state machine:
-   *battle started → which monsters are present → battle ended*.
-4. **Fetches monster info** by scraping a wiki HTML page and shows it in a **toggleable overlay**,
-   clearing it when a monster dies or the battle ends.
+2. **Runs OCR** on a fixed UI region to detect monster names in real time.
+3. **Shows an embedded monster info page** (monsterbuddy.app) for each detected monster inside
+   the app window — one button per monster, switches instantly.
+4. **Integrates with [Grimoire](https://grimoire.laeradsphere.com/)** via a floating 🔮 button
+   that opens the tracker inside the app. Auth cookies are persisted so you stay logged in
+   between sessions. OCR results will open the relevant Grimoire endpoint automatically.
 
 ## Requirements
 
 - Windows 10/11
-- **OBS Virtual Camera** driver installed (ships with OBS Studio). Required for feature #1.
-- Python 3.12 (the launcher creates a venv for you).
+- **Python 3.12** — see Installation below.
+- **OBS Virtual Camera** driver — ships with [OBS Studio](https://obsproject.com/). Required
+  for the virtual camera feature.
 
-## Quick start
+## Installation
+
+### 1 — Install Python 3.12
+
+Download the installer from <https://www.python.org/downloads/release/python-3120/> and run it.
+Tick **"Add python.exe to PATH"** before clicking Install.
+
+Verify in a new terminal:
 
 ```bat
+python --version
+```
+
+### 2 — Launch (first run installs everything automatically)
+
+```bat
+cd path\to\grimoireassist
 run.bat
 ```
 
-First run creates `.venv`, installs dependencies (this downloads PyTorch + EasyOCR model
-weights — a few hundred MB), then launches the app.
+`run.bat` creates the `.venv`, installs all dependencies, then starts the app. On subsequent
+runs it skips straight to launching.
 
-To run manually:
-
-```bat
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python -m grimoireassist
-```
+> **Note:** the first run downloads PyTorch and EasyOCR model weights — allow a few hundred
+> MB of downloads.
 
 ### Useful flags
 
@@ -79,6 +89,15 @@ region matters; `battle_status` and the `keywords` are ignored.
 Set `ocr.continuous: false` to use the battle state machine instead, which gates monster
 detection between a battle-start and battle-end keyword (uses `battle_status` + `keywords`).
 
+## Grimoire integration
+
+Click the **🔮** button (bottom-right corner of the app) to toggle the
+[Grimoire](https://grimoire.laeradsphere.com/) game tracker inside the app. Your login session
+is stored on disk and restored automatically on next launch — you only need to log in once.
+
+In future versions, OCR results will open the corresponding Grimoire endpoint directly (e.g. a
+detected monster will jump to its Grimoire entry).
+
 ## Games
 
 The app supports multiple games. On first launch a **game selection page** appears; pick the
@@ -117,9 +136,10 @@ near-misses (e.g. "Rathaios" → "Rathalos") still resolve to the correct page a
 
 ## Hotkeys
 
-| Key        | Action                       |
-|------------|------------------------------|
-| F9         | Open region calibration       |
+| Key | Action                  |
+|-----|-------------------------|
+| F9  | Open region calibration |
+| F11 | Toggle fullscreen       |
 
 ## How it works
 
@@ -138,7 +158,7 @@ grimoireassist/
   battle.py        ContinuousDetector + BattleStateMachine + OcrWorker (QThread)
   overlay.py       OverlayModel (UI state)
   data/            games.json + monsters_<x>.json (bundled per-game data)
-  ui/              main window (☰ menu), monster panel (web view),
+  ui/              main window (☰ menu), monster panel (web view + Grimoire toggle),
                    calibration dialog, game-select dialog
 ```
 
@@ -150,5 +170,4 @@ pip install pytest
 pytest
 ```
 
-Covers the battle state machine transitions and the wiki scraper (against an HTML fixture) — no
-camera or GUI required.
+Covers the battle state machine transitions — no camera or GUI required.
