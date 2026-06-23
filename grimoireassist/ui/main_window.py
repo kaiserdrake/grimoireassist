@@ -9,19 +9,20 @@ from typing import List, Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QLabel, QMainWindow, QMenu, QMessageBox, QToolBar, QToolButton,
+    QLabel, QMainWindow, QMenu, QMessageBox, QSizePolicy, QToolBar, QToolButton,
+    QWidget,
 )
 
 from ..battle import OcrWorker
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
-from ..config import Config
+from ..config import Config, GameSettings
 from ..games import GameInfo, get_game, default_game, load_catalog, monster_names, slug_map
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
-from .monster_panel import MonsterPanel
+from .monster_panel import MonsterNav, MonsterPanel
 
 
 class MainWindow(QMainWindow):
@@ -54,6 +55,10 @@ class MainWindow(QMainWindow):
         if cfg.ui.always_on_top:
             self._apply_on_top(True)
 
+        # camera-health tracking (drives the error status)
+        self._last_seq = -1
+        self._camera_ok = True
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_status)
         self._timer.start(500)
@@ -73,7 +78,10 @@ class MainWindow(QMainWindow):
         self.game = game
         self.cfg.selected_game = game.id
         self.cfg.monster_name_list = monster_names(game.monsters)
-        self.cfg.ocr.regions_monster_names = self.cfg.regions_for(game.id)
+        gs = self.cfg.regions_for(game.id)
+        self.cfg.ocr.regions_monster_names = gs.monster_names
+        self.cfg.ocr.regions_battle_end = gs.battle_end
+        self.cfg.ocr.keywords_battle_end = gs.end_keywords
         self.cfg.save()
         self.setWindowTitle(f"GrimoireAssist — {game.name}")
 
@@ -123,7 +131,12 @@ class MainWindow(QMainWindow):
 
         self.menu = QMenu(self)
         self.camera_menu = self.menu.addMenu("Camera")
+        self.menu.addAction("Retry camera", self._retry_camera)
         self.menu.addAction("Calibrate regions…\tF9", self._open_calibration)
+        self.act_gpu = self.menu.addAction("Use GPU for OCR")
+        self.act_gpu.setCheckable(True)
+        self.act_gpu.setChecked(self.cfg.ocr.gpu)
+        self.act_gpu.toggled.connect(self._toggle_gpu)
         self.act_on_top = self.menu.addAction("Always on top")
         self.act_on_top.setCheckable(True)
         self.act_on_top.setChecked(self.cfg.ui.always_on_top)
@@ -136,9 +149,18 @@ class MainWindow(QMainWindow):
         self.menu.aboutToShow.connect(self._populate_camera_menu)
 
         self.menu_btn.setMenu(self.menu)
-        tb.addWidget(self.menu_btn)
 
+        # Navbar = burger menu (far left) + detection result + grimoire toggle (right).
+        tb.addWidget(self.menu_btn)
         tb.addSeparator()
+
+        self.nav = MonsterNav()
+        self.nav.monster_selected.connect(self._on_monster_selected)
+        tb.addWidget(self.nav)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
 
         self.grimoire_btn = QToolButton()
         self.grimoire_btn.setText("\U0001f52e")
@@ -150,6 +172,10 @@ class MainWindow(QMainWindow):
         )
         self.grimoire_btn.clicked.connect(self._toggle_grimoire)
         tb.addWidget(self.grimoire_btn)
+
+    def _on_monster_selected(self, name: str) -> None:
+        if self.panel is not None:
+            self.panel.show_monster(name)
 
     def _populate_camera_menu(self) -> None:
         self.camera_menu.clear()
@@ -176,7 +202,25 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
 
+    # ================= ocr engine =================
+    def _toggle_gpu(self, checked: bool) -> None:
+        """Switch OCR between GPU and CPU: rebuild the engine and restart the worker."""
+        self.cfg.ocr.gpu = checked
+        self.cfg.save()
+        self.engine = build_engine(self.cfg.ocr.engine, self.cfg.ocr.languages, checked)
+        self._start_worker()
+        self.statusBar().showMessage(
+            f"OCR now using {'GPU' if checked else 'CPU'} (model reloads on first read)", 4000)
+
     # ================= camera =================
+    def _retry_camera(self) -> None:
+        """Force a fresh open of the current device (e.g. after another app released it)."""
+        self.nav.set_status("Connecting to camera…", False)
+        self.statusBar().showMessage("Reconnecting camera…", 2000)
+        self._camera_ok = True
+        self._last_seq = -1
+        self._start_capture(self.cfg.capture.device_index)
+
     def _switch_device(self, device_index: int) -> None:
         self.cfg.capture.device_index = device_index
         self.cfg.capture.video_file = None
@@ -251,14 +295,26 @@ class MainWindow(QMainWindow):
     # ================= loops / signals =================
     def _refresh_status(self) -> None:
         self._update_vcam_label()
-        if self.capture and self.capture.last_error:
-            self.statusBar().showMessage(self.capture.last_error, 2000)
+        # Detect whether frames are actually arriving from the camera.
+        seq = self.buffer.current_seq()
+        flowing = seq != self._last_seq
+        self._last_seq = seq
+        err = self.capture.last_error if self.capture else None
+        if not flowing:
+            if err:
+                self.nav.set_status(f"⚠ Camera error: {err}", False, error=True)
+            else:
+                self.nav.set_status("Connecting to camera…", False)
+            self._camera_ok = False
+        elif not self._camera_ok:
+            # frames resumed — restore the normal detection status
+            self._camera_ok = True
+            self._refresh_panel()
 
     def _refresh_panel(self) -> None:
-        if self.panel is None:
-            return
-        self.panel.set_status(self.model.status_text, self.model.in_battle)
-        self.panel.set_monsters(self.model.monsters)
+        # status + monster buttons live in the navbar; the panel shows the page
+        self.nav.set_status(self.model.status_text, self.model.in_battle)
+        self.nav.set_monsters(self.model.monsters)
 
     def _on_battle_started(self) -> None:
         self.model.battle_started()
@@ -289,7 +345,7 @@ class MainWindow(QMainWindow):
             self._start_idle()
 
     # ================= idle / auto-switch =================
-    _IDLE_TIMEOUT = 7
+    _IDLE_TIMEOUT = 10
 
     def _start_idle(self) -> None:
         if not self._idle_timer.isActive():
@@ -331,11 +387,15 @@ class MainWindow(QMainWindow):
             return
         dlg = CalibrateDialog(self.cfg, frame, self)
         if dlg.exec():
-            # CalibrateDialog updated cfg.ocr.regions_monster_names (active);
-            # persist them under the current game. The worker reads the live list.
+            # CalibrateDialog updated the active regions; persist them for this game.
+            # The worker reads the live OcrConfig, so changes apply without a restart.
             if self.cfg.selected_game:
-                self.cfg.set_regions_for(self.cfg.selected_game,
-                                         self.cfg.ocr.regions_monster_names)
+                gs = GameSettings(
+                    monster_names=self.cfg.ocr.regions_monster_names,
+                    battle_end=self.cfg.ocr.regions_battle_end,
+                    end_keywords=self.cfg.ocr.keywords_battle_end,
+                )
+                self.cfg.set_regions_for(self.cfg.selected_game, gs)
             self.cfg.save()
             self.statusBar().showMessage("Regions saved", 2000)
 

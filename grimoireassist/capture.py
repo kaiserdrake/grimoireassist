@@ -33,6 +33,11 @@ class FrameBuffer:
                 return None, self._seq
             return self._frame.copy(), self._seq
 
+    def current_seq(self) -> int:
+        """Frame counter without copying — used to detect whether frames flow."""
+        with self._lock:
+            return self._seq
+
 
 def list_devices(max_index: int = 8) -> list[int]:
     """Probe device indices that open successfully."""
@@ -112,9 +117,13 @@ class CaptureThread(threading.Thread):
         while not self._stop_event.is_set():
             cap = self._open()
             if cap is None:
-                self.last_error = (
-                    f"Could not open {'video file' if self.video_file else f'device {self.device_index}'}"
-                )
+                if self.video_file:
+                    self.last_error = f"Could not open video file: {self.video_file}"
+                else:
+                    self.last_error = (
+                        f"can't open device {self.device_index} "
+                        f"(in use by another app, or unplugged)"
+                    )
                 time.sleep(min(backoff, 5.0))
                 backoff = min(backoff * 2, 5.0)
                 continue
@@ -136,9 +145,9 @@ class CaptureThread(threading.Thread):
                         self.on_frame(frame)
                     except Exception as exc:  # never let the sink kill capture
                         self.last_error = f"frame sink error: {exc}"
-                # pace for file playback; live devices self-pace
-                if self.video_file:
-                    dt = time.time() - t0
-                    if dt < frame_interval:
-                        time.sleep(frame_interval - dt)
+                # Always pace to the target fps. Some capture cards return frames
+                # without blocking, which would otherwise spin a CPU core at 100%.
+                dt = time.time() - t0
+                if dt < frame_interval:
+                    time.sleep(frame_interval - dt)
             cap.release()

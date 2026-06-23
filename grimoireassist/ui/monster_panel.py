@@ -1,8 +1,9 @@
-"""Panel that shows the monster info site page for detected monsters.
+"""Monster info UI.
 
-A row of buttons (one per detected monster name) sits above an embedded web view
-that loads `<url_template>` for the selected monster. When the OCR area is empty
-the view is cleared.
+- `MonsterNav`   : status text ("X detected") + a button per detected monster.
+                  Lives in the toolbar/navbar next to the burger menu.
+- `MonsterPanel` : the embedded web area (monster page + grimoire view) and the
+                  idle countdown label. This is the central widget.
 
 The Grimoire view (index 1 in the stack) is toggled by the toolbar button in
 MainWindow via set_grimoire_visible(). Auth cookies are stored in a persistent
@@ -13,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -84,41 +85,94 @@ _BLANK_HTML = (
 )
 
 
+class MonsterNav(QWidget):
+    """Status text + one button per detected monster. Designed for the toolbar."""
+
+    monster_selected = pyqtSignal(str)  # emits the chosen name, or "" when cleared
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.current: Optional[str] = None
+        self._buttons: List[QPushButton] = []
+        self.setStyleSheet(
+            "QLabel { color:#cfcfd6; }"
+            "QPushButton { background:#2a2a36; border:none; border-radius:6px;"
+            " padding:4px 10px; color:#e8e8ec; }"
+            "QPushButton:checked { background:#ffd479; color:#1a1a1a; font-weight:600; }"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(8)
+
+        self.status_label = QLabel("Tracking areas...")
+        self.status_label.setStyleSheet("font-weight:600; color:#6b6b75;")
+        row.addWidget(self.status_label)
+
+        self._btn_row = QHBoxLayout()
+        self._btn_row.setSpacing(6)
+        row.addLayout(self._btn_row)
+        row.addStretch(1)
+
+    def set_status(self, text: str, active: bool, error: bool = False) -> None:
+        if error:
+            color = "#ff6b6b"
+        elif active:
+            color = "#3bd16f"
+        else:
+            color = "#6b6b75"
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"font-weight:600; color:{color};")
+
+    def set_monsters(self, names: List[str]) -> None:
+        self._rebuild_buttons(names)
+        if not names:
+            self.current = None
+            self.monster_selected.emit("")
+            return
+        target = self.current if self.current in names else names[0]
+        self._select(target)
+
+    def _select(self, name: str) -> None:
+        self.current = name
+        for b in self._buttons:
+            b.setChecked(b.text() == name)
+        self.monster_selected.emit(name)
+
+    def _rebuild_buttons(self, names: List[str]) -> None:
+        while self._btn_row.count():
+            item = self._btn_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._buttons = []
+        for name in names:
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _c, n=name: self._select(n))
+            self._btn_row.addWidget(btn)
+            self._buttons.append(btn)
+
+
 class MonsterPanel(QWidget):
+    """Embedded web area (monster page + grimoire view) + idle countdown."""
+
     def __init__(self, url_template: str, slug_map: Optional[Dict[str, str]] = None,
                  parent=None) -> None:
         super().__init__(parent)
         self.url_template = url_template
         self.slug_map = slug_map or {}
         self.current: Optional[str] = None
-        self._buttons: List[QPushButton] = []
 
-        self.setStyleSheet(
-            "QWidget { background:#15151b; color:#e8e8ec; }"
-            "QPushButton { background:#2a2a36; border:none; border-radius:6px;"
-            " padding:6px 12px; color:#e8e8ec; }"
-            "QPushButton:checked { background:#ffd479; color:#1a1a1a; font-weight:600; }"
-        )
+        self.setStyleSheet("QWidget { background:#15151b; color:#e8e8ec; }")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
-
-        self.status_label = QLabel("Tracking areas...")
-        self.status_label.setStyleSheet("font-size:14px; font-weight:600; color:#6b6b75;")
-        outer.addWidget(self.status_label)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
         self._countdown_label = QLabel()
         self._countdown_label.setStyleSheet(
-            "font-size:11px; color:#5a5a63; padding:2px 0;"
-        )
+            "font-size:11px; color:#5a5a63; padding:4px 10px;")
         self._countdown_label.setVisible(False)
         outer.addWidget(self._countdown_label)
-
-        # row of monster-name buttons
-        self._btn_row = QHBoxLayout()
-        self._btn_row.setSpacing(6)
-        self._btn_row.addStretch(1)
-        outer.addLayout(self._btn_row)
 
         # stacked web area: index 0 = monster view, index 1 = grimoire view
         self._stack = QStackedWidget()
@@ -159,8 +213,7 @@ class MonsterPanel(QWidget):
             self._countdown_label.setVisible(False)
         else:
             self._countdown_label.setText(
-                f"Transitioning view in {seconds}s of no object detected"
-            )
+                f"Transitioning view in {seconds}s of no object detected")
             self._countdown_label.setVisible(True)
 
     def open_grimoire_url(self, url: str) -> None:
@@ -169,49 +222,14 @@ class MonsterPanel(QWidget):
             self._grimoire_web.setUrl(QUrl(url))
         self.set_grimoire_visible(True)
 
-    # -- updates ---------------------------------------------------------
-    def set_status(self, text: str, active: bool) -> None:
-        color = "#3bd16f" if active else "#6b6b75"
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet(
-            f"font-size:14px; font-weight:600; color:{color};")
-
-    def set_monsters(self, names: List[str]) -> None:
-        self._rebuild_buttons(names)
-        if not names:
-            self.current = None
-            self._load_blank()
-            return
-        # keep showing the current monster if it's still present, else the first
-        target = self.current if self.current in names else names[0]
-        self.show_monster(target)
-
+    # -- monster page ----------------------------------------------------
     def show_monster(self, name: str) -> None:
-        self.current = name
-        for b in self._buttons:
-            b.setChecked(b.text() == name)
-        if self.web is not None:
-            slug = self.slug_map.get(name) or to_slug(name)
-            self.web.setUrl(QUrl(self.url_template.format(name=slug)))
-
-    # -- helpers ---------------------------------------------------------
-    def _rebuild_buttons(self, names: List[str]) -> None:
-        # clear existing buttons (keep trailing stretch at index -1)
-        while self._btn_row.count() > 1:
-            item = self._btn_row.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        self._buttons = []
-        for name in names:
-            btn = QPushButton(name)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _checked, n=name: self.show_monster(n))
-            self._btn_row.insertWidget(self._btn_row.count() - 1, btn)
-            self._buttons.append(btn)
-
-    def _load_blank(self) -> None:
-        for b in self._buttons:
-            b.setChecked(False)
-        if self.web is not None:
+        """Load the monster info page; an empty name shows the blank placeholder."""
+        self.current = name or None
+        if self.web is None:
+            return
+        if not name:
             self.web.setHtml(_BLANK_HTML)
+            return
+        slug = self.slug_map.get(name) or to_slug(name)
+        self.web.setUrl(QUrl(self.url_template.format(name=slug)))

@@ -7,7 +7,8 @@ import numpy as np
 from PyQt6.QtCore import Qt, QRect, QPoint
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
+    QVBoxLayout,
 )
 
 from ..config import Config, Region
@@ -188,8 +189,10 @@ class CalibrateDialog(QDialog):
         regions: dict[str, Region] = {}
         for i, r in enumerate(cfg.ocr.regions_monster_names):
             regions[f"monster_{i+1}"] = Region(**vars(r))
-        if not regions:
+        if not any(k.startswith("monster_") for k in regions):
             regions["monster_1"] = Region()
+        # optional Battle-End trigger region (e.g. over the "Result" text)
+        regions["battle_end"] = Region(**vars(cfg.ocr.regions_battle_end))
         self.canvas.set_regions(regions)
 
         self.region_picker = QComboBox()
@@ -215,7 +218,14 @@ class CalibrateDialog(QDialog):
         top.addWidget(QLabel("Monster regions:"))
         top.addWidget(self.slot_count)
         top.addStretch(1)
-        top.addWidget(QLabel("Drag to draw · drag body to move · drag a corner to resize"))
+        top.addWidget(QLabel("drag to draw / move / resize"))
+
+        # Battle-End trigger: the region (drawn above as 'battle_end') + the text to match.
+        end_row = QHBoxLayout()
+        end_row.addWidget(QLabel("Battle-End text (comma-separated):"))
+        self.end_text_edit = QLineEdit(", ".join(cfg.ocr.keywords_battle_end))
+        self.end_text_edit.setPlaceholderText("e.g. Result, Victory, Defeat")
+        end_row.addWidget(self.end_text_edit, 1)
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
@@ -224,6 +234,7 @@ class CalibrateDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addLayout(end_row)
         layout.addWidget(self.canvas, 1)
         layout.addLayout(bottom)
 
@@ -251,4 +262,8 @@ class CalibrateDialog(QDialog):
             i += 1
         # update the active regions; the caller persists them under the current game
         self.cfg.ocr.regions_monster_names = slots or [Region()]
+        self.cfg.ocr.regions_battle_end = regions.get("battle_end", Region())
+        self.cfg.ocr.keywords_battle_end = [
+            s.strip() for s in self.end_text_edit.text().split(",") if s.strip()
+        ]
         self.accept()

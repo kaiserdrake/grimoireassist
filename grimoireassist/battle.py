@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Deque, Dict, List, Optional
 
+import cv2
 import numpy as np
 
 from .config import Config, Region
@@ -46,6 +47,80 @@ def canonicalize(text: str, known_names: List[str], cutoff: float = 0.6) -> str:
             if _norm(n) == match[0]:
                 return n
     return text.strip()
+
+
+def match_known(text: str, known_names: List[str], cutoff: float = 0.6) -> Optional[str]:
+    """Return the known monster name matching `text`, or None if it isn't close to any.
+
+    Unlike `canonicalize`, this REJECTS text that doesn't resemble a real monster, so OCR
+    noise during animations never becomes a fake monster. With no known list, accepts the
+    raw text (best effort)."""
+    t = _norm(text)
+    if not t:
+        return None
+    if not known_names:
+        return text.strip() or None
+    match = difflib.get_close_matches(t, [_norm(n) for n in known_names], n=1, cutoff=cutoff)
+    if match:
+        for n in known_names:
+            if _norm(n) == match[0]:
+                return n
+    return None
+
+
+class MonsterTracker:
+    """Persistent monster detection with a retention timeout.
+
+    Each detected monster stays visible for `persist_seconds` after it was last seen, which
+    bridges the gaps where attack animations hide the name. While the caller reports the
+    Battle-End trigger (`end_detected`), retention drops to `end_persist_seconds` so the list
+    clears promptly once the fight is over.
+    """
+
+    def __init__(self, known_names: Optional[List[str]] = None,
+                 persist_seconds: float = 5.0, end_persist_seconds: float = 1.0) -> None:
+        self.known_names = known_names or []
+        self.persist_seconds = persist_seconds
+        self.end_persist_seconds = end_persist_seconds
+        self._seen: Dict[str, float] = {}     # name -> last_seen_time (insertion-ordered)
+        self._last_found: List[str] = []      # matched names from the most recent OCR
+        self._emitted: List[str] = []
+        self.on_changed: Optional[Callable[[List[str]], None]] = None
+
+    def observe(self, names: List[str], now: float) -> None:
+        """A fresh OCR read: record matched monsters as seen 'now'."""
+        found, seen_keys = [], set()
+        for raw in names:
+            n = match_known(raw, self.known_names)
+            if n:
+                key = _norm(n)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    found.append(n)
+        self._last_found = found
+        for n in found:
+            self._seen[n] = now
+
+    def touch(self, now: float) -> None:
+        """Region unchanged since last OCR — the last-found monsters are still on screen."""
+        for n in self._last_found:
+            if n in self._seen:
+                self._seen[n] = now
+
+    def expire(self, now: float, end_detected: bool) -> None:
+        persist = self.end_persist_seconds if end_detected else self.persist_seconds
+        for n in [k for k, t in list(self._seen.items()) if now - t > persist]:
+            del self._seen[n]
+
+    def current(self) -> List[str]:
+        return list(self._seen.keys())
+
+    def emit_if_changed(self) -> None:
+        cur = self.current()
+        if [_norm(n) for n in cur] != [_norm(n) for n in self._emitted]:
+            self._emitted = list(cur)
+            if self.on_changed:
+                self.on_changed(list(cur))
 
 
 class ContinuousDetector:
@@ -209,27 +284,24 @@ try:
             self.buffer = frame_buffer
             self.engine = engine
             self._running = True
-            self.continuous = cfg.ocr.continuous
-            if self.continuous:
-                # always-on monster detection; no battle start/end gating
-                self.detector = ContinuousDetector(
-                    known_names=cfg.monster_name_list,
-                    debounce_frames=cfg.ocr.debounce_frames,
-                )
-                self.detector.on_changed = self.monsters_changed.emit
-                self.machine = None
-            else:
-                self.detector = None
-                self.machine = BattleStateMachine(
-                    keywords_start=cfg.ocr.keywords_battle_start,
-                    keywords_end=cfg.ocr.keywords_battle_end,
-                    known_names=cfg.monster_name_list,
-                    debounce_frames=cfg.ocr.debounce_frames,
-                )
-                self.machine.on_battle_started = self.battle_started.emit
-                self.machine.on_battle_ended = self.battle_ended.emit
-                self.machine.on_monsters_changed = self.monsters_changed.emit
-                self.machine.on_monster_killed = self.monster_killed.emit
+            self._last_sig = None   # last OCR'd monster fingerprint (change detection)
+            self._last_ocr_t = 0.0  # time of last monster OCR (heartbeat)
+            self._end_sig = None    # last Battle-End region fingerprint
+            self._end_ocr_t = 0.0
+            self._end_cached = False
+            self.tracker = MonsterTracker(
+                known_names=cfg.monster_name_list,
+                persist_seconds=cfg.ocr.monster_persist_s,
+                end_persist_seconds=cfg.ocr.monster_persist_end_s,
+            )
+            self.tracker.on_changed = self.monsters_changed.emit
+
+        # Skip OCR while the monster region is visually unchanged; only a real
+        # change (text appearing/changing) triggers an inference, so idle screens
+        # cost ~0 GPU. A heartbeat still re-OCRs a static scene periodically, so a
+        # single bad read caught mid-transition can't stick while frozen.
+        _CHANGE_THRESHOLD = 2.0
+        _HEARTBEAT_S = 1.0
 
         def stop(self) -> None:
             self._running = False
@@ -242,6 +314,50 @@ try:
                 return None
             return frame[region.as_slice()]
 
+        def _region_signature(self, frame: np.ndarray) -> Optional[np.ndarray]:
+            """Tiny grayscale fingerprint of the monster region(s) for change detection."""
+            parts = []
+            for region in self.cfg.ocr.regions_monster_names:
+                crop = self._crop(frame, region)
+                if crop is None:
+                    continue
+                g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+                parts.append(cv2.resize(g, (64, 16), interpolation=cv2.INTER_AREA).ravel())
+            if not parts:
+                return None
+            return np.concatenate(parts).astype(np.int16)
+
+        def _region_changed(self, sig: Optional[np.ndarray]) -> bool:
+            if sig is None:
+                return False
+            last = self._last_sig
+            if last is not None and last.shape == sig.shape:
+                if float(np.abs(sig - last).mean()) < self._CHANGE_THRESHOLD:
+                    return False
+            return True
+
+        def _detect_end(self, frame: np.ndarray, now: float) -> bool:
+            """Whether the Battle-End region currently shows an end keyword.
+
+            Change-detected + cached so a static end banner costs ~0 GPU."""
+            region = self.cfg.ocr.regions_battle_end
+            if not region.is_set():
+                return False
+            crop = self._crop(frame, region)
+            if crop is None:
+                return False
+            g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+            sig = cv2.resize(g, (48, 16), interpolation=cv2.INTER_AREA).astype(np.int16)
+            changed = (self._end_sig is None or self._end_sig.shape != sig.shape
+                       or float(np.abs(sig - self._end_sig).mean()) >= self._CHANGE_THRESHOLD)
+            if changed or (now - self._end_ocr_t) >= self._HEARTBEAT_S:
+                text = self.engine.read_text(crop)
+                needles = [_norm(k) for k in self.cfg.ocr.keywords_battle_end]
+                self._end_cached = _contains_any(text, needles)
+                self._end_sig = sig
+                self._end_ocr_t = now
+            return self._end_cached
+
         def run(self) -> None:
             interval = 1.0 / max(0.5, self.cfg.ocr.poll_fps)
             last_seq = -1
@@ -253,25 +369,27 @@ try:
                     continue
                 last_seq = seq
                 try:
-                    if self.continuous:
-                        # read each detected name in the monster area(s) separately
+                    # Monster region: OCR only when it changed or the heartbeat is due;
+                    # otherwise the same monsters are still on screen (touch keeps them).
+                    sig = self._region_signature(frame)
+                    changed = self._region_changed(sig)
+                    due = (t0 - self._last_ocr_t) >= self._HEARTBEAT_S
+                    if changed or due:
                         names: list = []
                         for region in self.cfg.ocr.regions_monster_names:
                             crop = self._crop(frame, region)
                             if crop is not None:
                                 names.extend(self.engine.read_lines(crop))
+                        self._last_sig = sig
+                        self._last_ocr_t = t0
+                        self.tracker.observe(names, t0)
                         self.debug_text.emit("", names)
-                        self.detector.update(names)
                     else:
-                        status_crop = self._crop(frame, self.cfg.ocr.regions_battle_status)
-                        status_text = self.engine.read_text(status_crop) if status_crop is not None else ""
-                        monster_texts = []
-                        if self.machine.state is BattleState.IN_BATTLE:
-                            for region in self.cfg.ocr.regions_monster_names:
-                                crop = self._crop(frame, region)
-                                monster_texts.append(self.engine.read_text(crop) if crop is not None else "")
-                        self.debug_text.emit(status_text, monster_texts)
-                        self.machine.update(status_text, monster_texts)
+                        self.tracker.touch(t0)
+                    # Retention shrinks while the Battle-End banner is showing.
+                    end_detected = self._detect_end(frame, t0)
+                    self.tracker.expire(t0, end_detected)
+                    self.tracker.emit_if_changed()
                 except Exception as exc:
                     self.error.emit(f"OCR error: {exc}")
                 dt = time.time() - t0

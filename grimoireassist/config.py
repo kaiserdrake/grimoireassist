@@ -42,6 +42,9 @@ class VirtualCameraConfig:
     enabled: bool = True
 
 
+_DEFAULT_END_KEYWORDS = ["result", "victory", "defeat"]
+
+
 @dataclass
 class OcrConfig:
     engine: str = "easyocr"
@@ -49,12 +52,22 @@ class OcrConfig:
     languages: List[str] = field(default_factory=lambda: ["en"])
     gpu: bool = False
     debounce_frames: int = 3
-    continuous: bool = True  # True = always OCR monster area; no battle start/end gating
-    # active regions for the selected game (populated at runtime, not serialized here)
+    continuous: bool = True  # vestigial; monster detection is always on
+    monster_persist_s: float = 7.0       # keep a monster this long after it's last seen
+    monster_persist_end_s: float = 1.0   # shorter retention while "Battle End" text shows
+    # active per-game values (populated at runtime, not serialized here)
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
-    regions_battle_status: Region = field(default_factory=Region)
-    keywords_battle_start: List[str] = field(default_factory=lambda: ["battle start"])
-    keywords_battle_end: List[str] = field(default_factory=lambda: ["victory", "defeat"])
+    regions_battle_end: Region = field(default_factory=Region)
+    keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
+
+
+@dataclass
+class GameSettings:
+    """Per-game OCR layout: the monster name region(s), an optional Battle-End
+    trigger region, and the keyword text that marks the battle end."""
+    monster_names: List[Region] = field(default_factory=lambda: [Region()])
+    battle_end: Region = field(default_factory=Region)
+    end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
 
 
 @dataclass
@@ -76,16 +89,15 @@ class Config:
     monster_name_list: List[str] = field(default_factory=list)  # active list
     ui: UiConfig = field(default_factory=UiConfig)
     selected_game: Optional[str] = None
-    games: Dict[str, List[Region]] = field(default_factory=dict)  # per-game regions
+    games: Dict[str, GameSettings] = field(default_factory=dict)  # per-game settings
     _path: Optional[Path] = None
 
-    # ---- per-game regions ---------------------------------------------
-    def regions_for(self, game_id: str) -> List[Region]:
-        regs = self.games.get(game_id)
-        return list(regs) if regs else [Region()]
+    # ---- per-game settings --------------------------------------------
+    def regions_for(self, game_id: str) -> GameSettings:
+        return self.games.get(game_id) or GameSettings()
 
-    def set_regions_for(self, game_id: str, regions: List[Region]) -> None:
-        self.games[game_id] = list(regions) if regions else [Region()]
+    def set_regions_for(self, game_id: str, settings: GameSettings) -> None:
+        self.games[game_id] = settings
 
     # ---- loading -------------------------------------------------------
     @classmethod
@@ -107,11 +119,18 @@ class Config:
         ocr = raw.get("ocr", {})
         ui = raw.get("ui", {})
 
-        # per-game regions
-        games: Dict[str, List[Region]] = {}
+        # per-game settings
+        games: Dict[str, GameSettings] = {}
         for gid, g in (raw.get("games") or {}).items():
-            regs = (g or {}).get("regions", {}).get("monster_names") or [{}]
-            games[gid] = [_region(r) for r in regs]
+            regions = (g or {}).get("regions", {})
+            keywords = (g or {}).get("keywords", {})
+            mons = regions.get("monster_names") or [{}]
+            end_kw = [str(k) for k in (keywords.get("battle_end") or [])]
+            games[gid] = GameSettings(
+                monster_names=[_region(r) for r in mons],
+                battle_end=_region(regions.get("battle_end")),
+                end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
+            )
 
         selected_game = raw.get("selected_game")
 
@@ -131,6 +150,8 @@ class Config:
                 gpu=bool(ocr.get("gpu", False)),
                 debounce_frames=int(ocr.get("debounce_frames", 3)),
                 continuous=bool(ocr.get("continuous", True)),
+                monster_persist_s=float(ocr.get("monster_persist_s", 7.0)),
+                monster_persist_end_s=float(ocr.get("monster_persist_end_s", 1.0)),
             ),
             ui=UiConfig(always_on_top=bool(ui.get("always_on_top", False))),
             selected_game=selected_game,
@@ -164,7 +185,7 @@ class Config:
         if gid is None and load_catalog():
             gid = load_catalog()[0].id
         if gid:
-            cfg.games[gid] = [_region(r) for r in old_regions]
+            cfg.games[gid] = GameSettings(monster_names=[_region(r) for r in old_regions])
             if not cfg.selected_game:
                 cfg.selected_game = gid
 
@@ -187,11 +208,19 @@ class Config:
                 "gpu": self.ocr.gpu,
                 "debounce_frames": self.ocr.debounce_frames,
                 "continuous": self.ocr.continuous,
+                "monster_persist_s": self.ocr.monster_persist_s,
+                "monster_persist_end_s": self.ocr.monster_persist_end_s,
             },
             "ui": {"always_on_top": self.ui.always_on_top},
             "games": {
-                gid: {"regions": {"monster_names": [asdict(r) for r in regs]}}
-                for gid, regs in self.games.items()
+                gid: {
+                    "regions": {
+                        "monster_names": [asdict(r) for r in gs.monster_names],
+                        "battle_end": asdict(gs.battle_end),
+                    },
+                    "keywords": {"battle_end": gs.end_keywords},
+                }
+                for gid, gs in self.games.items()
             },
         }
 

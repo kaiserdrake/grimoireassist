@@ -4,7 +4,6 @@ capture:
   width: 1920
   height: 1080
   fps: 30
-  video_file: __none__.mp4
 virtual_camera:
   enabled: true
 ocr:
@@ -12,9 +11,11 @@ ocr:
   poll_fps: 3.0
   languages:
   - en
-  gpu: false
+  gpu: true
   debounce_frames: 3
   continuous: true
+  monster_persist_s: 7.0
+  monster_persist_end_s: 1.0
 ui:
   always_on_top: false
 games:
@@ -25,3 +26,11 @@ games:
         y: 21
         w: 1665
         h: 136
+      battle_end:
+        x: 14
+        y: 14
+        w: 457
+        h: 189
+    keywords:
+      battle_end:
+      - result

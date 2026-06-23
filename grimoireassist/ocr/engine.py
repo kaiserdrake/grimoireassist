@@ -8,15 +8,28 @@ import cv2
 import numpy as np
 
 
-def preprocess(crop: np.ndarray, upscale: float = 2.5) -> np.ndarray:
-    """Make stylized game-UI text easier to read: grayscale, upscale, threshold."""
+# Keep OCR cheap WITHOUT hurting accuracy: cap the longest side (so a wide region
+# isn't blown up to 4000px+), and only upscale genuinely small regions. We do NOT
+# shrink text down to a tiny height — that costs detection accuracy and causes the
+# OCR to intermittently miss a name that's clearly on screen.
+_MAX_SIDE = 1280
+_MIN_HEIGHT = 48
+
+
+def preprocess(crop: np.ndarray) -> np.ndarray:
+    """Grayscale + size-normalise + threshold for readable, low-cost OCR input."""
     if crop is None or crop.size == 0:
         return crop
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-    if upscale and upscale != 1.0:
-        gray = cv2.resize(gray, None, fx=upscale, fy=upscale,
-                          interpolation=cv2.INTER_CUBIC)
-    gray = cv2.bilateralFilter(gray, 5, 50, 50)
+    h, w = gray.shape[:2]
+    scale = 1.0
+    if max(w, h) > _MAX_SIDE:
+        scale = _MAX_SIDE / max(w, h)      # shrink only oversized regions
+    elif h < _MIN_HEIGHT:
+        scale = _MIN_HEIGHT / h            # enlarge tiny text
+    if abs(scale - 1.0) > 0.05:
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=interp)
     thr = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 12
     )

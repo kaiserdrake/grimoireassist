@@ -1,7 +1,7 @@
 """Smoke test: every module imports and the config round-trips. No camera/GUI shown."""
 import numpy as np
 
-from grimoireassist.config import Config, Region
+from grimoireassist.config import Config, GameSettings, Region
 from grimoireassist.capture import FrameBuffer
 from grimoireassist.overlay import OverlayModel
 
@@ -10,11 +10,18 @@ def test_config_roundtrip(tmp_path):
     p = tmp_path / "config.yaml"
     cfg = Config()
     cfg.selected_game = "mhs3"
-    cfg.set_regions_for("mhs3", [Region(10, 20, 100, 40)])
+    cfg.set_regions_for("mhs3", GameSettings(
+        monster_names=[Region(10, 20, 100, 40)],
+        battle_end=Region(5, 5, 50, 20),
+        end_keywords=["result"],
+    ))
     cfg.save(p)
     again = Config.load(p)
     assert again.selected_game == "mhs3"
-    assert again.regions_for("mhs3")[0].w == 100
+    gs = again.regions_for("mhs3")
+    assert gs.monster_names[0].w == 100
+    assert gs.battle_end.w == 50
+    assert gs.end_keywords == ["result"]
     assert again.ocr.continuous is True
 
 
@@ -28,7 +35,7 @@ def test_config_migrates_single_game(tmp_path):
     )
     cfg = Config.load(p)
     assert cfg.selected_game == "mhs3"
-    assert cfg.regions_for("mhs3")[0].w == 70
+    assert cfg.regions_for("mhs3").monster_names[0].w == 70
 
 
 def test_frame_buffer_roundtrip():

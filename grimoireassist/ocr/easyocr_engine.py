@@ -20,12 +20,18 @@ class EasyOcrEngine(OcrEngine):
             self._reader = easyocr.Reader(self.languages, gpu=self.gpu, verbose=False)
         return self._reader
 
+    # Cap the detection-network input. EasyOCR's default canvas_size is 2560;
+    # our regions are already small, so a smaller canvas cuts GPU/CPU work a lot.
+    _CANVAS = 1280
+    _MAG = 1.0
+
     def read_text(self, image: np.ndarray) -> str:
         if image is None or image.size == 0:
             return ""
         reader = self._ensure_reader()
         prepped = preprocess(image)
-        results = reader.readtext(prepped, detail=0, paragraph=True)
+        results = reader.readtext(prepped, detail=0, paragraph=True,
+                                  canvas_size=self._CANVAS, mag_ratio=self._MAG)
         return " ".join(results).strip()
 
     def read_lines(self, image: np.ndarray) -> list:
@@ -34,5 +40,6 @@ class EasyOcrEngine(OcrEngine):
             return []
         reader = self._ensure_reader()
         prepped = preprocess(image)
-        results = reader.readtext(prepped, detail=0, paragraph=False)
+        results = reader.readtext(prepped, detail=0, paragraph=False,
+                                  canvas_size=self._CANVAS, mag_ratio=self._MAG)
         return [r.strip() for r in results if r and r.strip()]
