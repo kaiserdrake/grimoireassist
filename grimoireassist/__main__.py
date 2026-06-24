@@ -153,11 +153,23 @@ def main(argv: list[str] | None = None) -> int:
     # QtWebEngine (embedded monster page) wants shared OpenGL contexts, set
     # before the QApplication is created.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-    from .games import get_game, load_catalog
+    from PyQt6.QtGui import QIcon
+    from .games import get_game, load_catalog, icon_path
     from .ui.game_select import GameSelectDialog
     from .ui.main_window import MainWindow
 
+    # On Windows, give the process its own AppUserModelID so the taskbar uses our
+    # window icon instead of the generic python.exe icon.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrimoireAssist")
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
+    _icon = icon_path()
+    if _icon:
+        app.setWindowIcon(QIcon(_icon))
     _apply_dark_theme(app)
 
     # Show the game-select page when no valid game is selected yet.

@@ -86,7 +86,7 @@ _BLANK_HTML = (
 
 
 class MonsterNav(QWidget):
-    """Status text + one button per detected monster. Designed for the toolbar."""
+    """Status pills (source + tracking) + one button per detected monster."""
 
     monster_selected = pyqtSignal(str)  # emits the chosen name, or "" when cleared
 
@@ -95,33 +95,47 @@ class MonsterNav(QWidget):
         self.current: Optional[str] = None
         self._buttons: List[QPushButton] = []
         self.setStyleSheet(
-            "QLabel { color:#cfcfd6; }"
             "QPushButton { background:#2a2a36; border:none; border-radius:6px;"
             " padding:4px 10px; color:#e8e8ec; }"
             "QPushButton:checked { background:#ffd479; color:#1a1a1a; font-weight:600; }"
         )
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 2, 4, 2)
-        row.setSpacing(8)
+        row.setSpacing(6)
 
-        self.status_label = QLabel("Tracking areas...")
-        self.status_label.setStyleSheet("font-weight:600; color:#6b6b75;")
-        row.addWidget(self.status_label)
+        self.source_pill = QLabel()
+        self.tracking_pill = QLabel()
+        self._style_pill(self.source_pill, "No Source", False)
+        self._style_pill(self.tracking_pill, "Idle", None)
+        row.addWidget(self.source_pill)
+        row.addWidget(self.tracking_pill)
+        row.addSpacing(6)
 
         self._btn_row = QHBoxLayout()
         self._btn_row.setSpacing(6)
         row.addLayout(self._btn_row)
         row.addStretch(1)
 
-    def set_status(self, text: str, active: bool, error: bool = False) -> None:
-        if error:
-            color = "#ff6b6b"
-        elif active:
-            color = "#3bd16f"
-        else:
-            color = "#6b6b75"
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet(f"font-weight:600; color:{color};")
+    @staticmethod
+    def _pill_colors(ok: Optional[bool]) -> tuple:
+        if ok is True:
+            return "#1f7a3f", "#eafff0"   # green
+        if ok is False:
+            return "#9e3b3b", "#ffecec"   # red
+        return "#3a3a44", "#cfcfd6"       # neutral / grey
+
+    def _style_pill(self, label: QLabel, text: str, ok: Optional[bool]) -> None:
+        bg, fg = self._pill_colors(ok)
+        label.setText(text)
+        label.setStyleSheet(
+            f"background:{bg}; color:{fg}; border-radius:9px;"
+            " padding:2px 10px; font-weight:600; font-size:12px;")
+
+    def set_source(self, text: str, ok: Optional[bool]) -> None:
+        self._style_pill(self.source_pill, text, ok)
+
+    def set_tracking(self, text: str, ok: Optional[bool]) -> None:
+        self._style_pill(self.tracking_pill, text, ok)
 
     def set_monsters(self, names: List[str]) -> None:
         self._rebuild_buttons(names)
@@ -192,6 +206,13 @@ class MonsterPanel(QWidget):
             grimoire_page = QWebEnginePage(self._grimoire_profile, self._grimoire_web)
             self._grimoire_web.setPage(grimoire_page)
             _inject_rotate_fix(grimoire_page)
+            # QtWebEngine denies getUserMedia by default — grant camera/mic so the
+            # grimoire "Insert Image from Camera" feature (and its device dropdown) works.
+            try:
+                grimoire_page.featurePermissionRequested.connect(
+                    self._grant_media_permission)
+            except Exception:
+                pass
             self._grimoire_web.setUrl(QUrl(GRIMOIRE_URL))
             self._stack.addWidget(self._grimoire_web)  # index 1
         else:
@@ -202,6 +223,19 @@ class MonsterPanel(QWidget):
             fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
             fallback.setStyleSheet("color:#c66;")
             self._stack.addWidget(fallback)
+
+    # -- camera/mic permission for the embedded grimoire page ------------
+    def _grant_media_permission(self, origin, feature) -> None:
+        page = self._grimoire_web.page() if self._grimoire_web else None
+        if page is None:
+            return
+        F = QWebEnginePage.Feature
+        media = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
+        if feature in media:
+            policy = QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+        else:
+            policy = QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+        page.setFeaturePermission(origin, feature, policy)
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------
     def set_grimoire_visible(self, visible: bool) -> None:

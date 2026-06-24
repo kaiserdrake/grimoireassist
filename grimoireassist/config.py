@@ -53,7 +53,7 @@ class OcrConfig:
     gpu: bool = False
     debounce_frames: int = 3
     continuous: bool = True  # vestigial; monster detection is always on
-    monster_persist_s: float = 7.0       # keep a monster this long after it's last seen
+    monster_persist_s: float = 12.0      # keep a monster this long after it's last seen
     monster_persist_end_s: float = 1.0   # shorter retention while "Battle End" text shows
     # active per-game values (populated at runtime, not serialized here)
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
@@ -150,7 +150,7 @@ class Config:
                 gpu=bool(ocr.get("gpu", False)),
                 debounce_frames=int(ocr.get("debounce_frames", 3)),
                 continuous=bool(ocr.get("continuous", True)),
-                monster_persist_s=float(ocr.get("monster_persist_s", 7.0)),
+                monster_persist_s=float(ocr.get("monster_persist_s", 12.0)),
                 monster_persist_end_s=float(ocr.get("monster_persist_end_s", 1.0)),
             ),
             ui=UiConfig(always_on_top=bool(ui.get("always_on_top", False))),

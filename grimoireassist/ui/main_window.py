@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QLabel, QMainWindow, QMenu, QMessageBox, QSizePolicy, QToolBar, QToolButton,
     QWidget,
@@ -16,7 +16,9 @@ from PyQt6.QtWidgets import (
 from ..battle import OcrWorker
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
 from ..config import Config, GameSettings
-from ..games import GameInfo, get_game, default_game, load_catalog, monster_names, slug_map
+from ..games import (
+    GameInfo, get_game, default_game, icon_path, load_catalog, monster_names, slug_map,
+)
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
@@ -30,6 +32,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self.resize(440, 600)
+        _icon = icon_path()
+        if _icon:
+            self.setWindowIcon(QIcon(_icon))
 
         self.model = OverlayModel()
         self.buffer = FrameBuffer()
@@ -215,7 +220,7 @@ class MainWindow(QMainWindow):
     # ================= camera =================
     def _retry_camera(self) -> None:
         """Force a fresh open of the current device (e.g. after another app released it)."""
-        self.nav.set_status("Connecting to camera…", False)
+        self.nav.set_source("Connecting…", None)
         self.statusBar().showMessage("Reconnecting camera…", 2000)
         self._camera_ok = True
         self._last_seq = -1
@@ -295,25 +300,28 @@ class MainWindow(QMainWindow):
     # ================= loops / signals =================
     def _refresh_status(self) -> None:
         self._update_vcam_label()
-        # Detect whether frames are actually arriving from the camera.
+        # Detect whether frames are actually arriving from the camera, and reflect
+        # source + tracking state in the navbar pills.
         seq = self.buffer.current_seq()
         flowing = seq != self._last_seq
         self._last_seq = seq
         err = self.capture.last_error if self.capture else None
-        if not flowing:
-            if err:
-                self.nav.set_status(f"⚠ Camera error: {err}", False, error=True)
-            else:
-                self.nav.set_status("Connecting to camera…", False)
-            self._camera_ok = False
-        elif not self._camera_ok:
-            # frames resumed — restore the normal detection status
+        if flowing:
+            self.nav.set_source("Source Active", True)
+            self.nav.set_tracking("Tracking", self.worker is not None)
             self._camera_ok = True
-            self._refresh_panel()
+        else:
+            self._camera_ok = False
+            if err:
+                self.nav.set_source("No Source", False)
+                self.statusBar().showMessage(f"Camera: {err}", 2000)
+            else:
+                self.nav.set_source("Connecting…", None)
+            self.nav.set_tracking("Idle", None)
 
     def _refresh_panel(self) -> None:
-        # status + monster buttons live in the navbar; the panel shows the page
-        self.nav.set_status(self.model.status_text, self.model.in_battle)
+        # monster buttons live in the navbar; the panel shows the page. The source/
+        # tracking pills are driven separately by _refresh_status.
         self.nav.set_monsters(self.model.monsters)
 
     def _on_battle_started(self) -> None:
@@ -326,10 +334,6 @@ class MainWindow(QMainWindow):
 
     def _on_monsters_changed(self, names: List[str]) -> None:
         self.model.set_monsters(names)
-        if self.cfg.ocr.continuous:
-            self.model.in_battle = bool(names)
-            self.model.status_text = (
-                f"{len(names)} detected" if names else "Tracking areas...")
         self._refresh_panel()
         if names:
             self._cancel_idle()
@@ -345,7 +349,7 @@ class MainWindow(QMainWindow):
             self._start_idle()
 
     # ================= idle / auto-switch =================
-    _IDLE_TIMEOUT = 10
+    _IDLE_TIMEOUT = 16
 
     def _start_idle(self) -> None:
         if not self._idle_timer.isActive():

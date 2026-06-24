@@ -14,7 +14,7 @@ ocr:
   gpu: true
   debounce_frames: 3
   continuous: true
-  monster_persist_s: 7.0
+  monster_persist_s: 12.0
   monster_persist_end_s: 1.0
 ui:
   always_on_top: false

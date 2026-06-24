@@ -63,3 +63,11 @@ def monster_names(monsters_file: str) -> List[str]:
 
 def slug_map(monsters_file: str) -> Dict[str, str]:
     return {name: slug for name, slug in _load_monsters(monsters_file)}
+
+
+def icon_path() -> str:
+    """Filesystem path to the app icon (.ico), or '' if unavailable."""
+    try:
+        return str(resources.files("grimoireassist.data") / "icon.ico")
+    except Exception:
+        return ""
