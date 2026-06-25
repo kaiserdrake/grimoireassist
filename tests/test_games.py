@@ -9,7 +9,12 @@ def test_catalog_loads():
     cat = load_catalog()
     ids = {g.id for g in cat}
     assert {"mhs3", "mhs2"} <= ids
-    assert get_game("mhs3").site_url_template.endswith("/3/monsters/{name}")
+    # MHS3 now sources from grimoire (search style); MHS2 stays monsterbuddy (path).
+    mhs3 = get_game("mhs3")
+    assert mhs3.url_style == "search"
+    assert "grimoire.laeradsphere.com" in mhs3.site_url_template
+    assert "{name}" in mhs3.site_url_template
+    assert get_game("mhs2").url_style == "path"
     assert default_game() is not None
     assert get_game("nope") is None
 

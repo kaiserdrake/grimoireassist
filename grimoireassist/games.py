@@ -18,7 +18,11 @@ class GameInfo:
     id: str
     name: str
     site_url_template: str
-    monsters: str  # bundled data file id, e.g. "monsters_3"
+    monsters: str            # bundled data file id, e.g. "monsters_3"
+    url_style: str = "path"  # "path" = /monsters/<slug>; "search" = ?st1=<terms>, multi-monster
+    multi_joiner: str = " || "   # separator for multiple monsters (search style)
+    requires_login: bool = False  # monster view uses a persistent (logged-in) profile
+    notes_url: str = ""           # secondary "notes" view (🔮 toggle); blank -> grimoire
 
 
 def _read_data(filename: str) -> str:
@@ -29,8 +33,11 @@ def _read_data(filename: str) -> str:
 def load_catalog() -> Tuple[GameInfo, ...]:
     try:
         data = json.loads(_read_data("games.json"))
-        return tuple(GameInfo(d["id"], d["name"], d["site_url_template"], d["monsters"])
-                     for d in data)
+        return tuple(GameInfo(
+            d["id"], d["name"], d["site_url_template"], d["monsters"],
+            d.get("url_style", "path"), d.get("multi_joiner", " || "),
+            bool(d.get("requires_login", False)), d.get("notes_url", ""),
+        ) for d in data)
     except Exception:
         return tuple()
 

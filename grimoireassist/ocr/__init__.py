@@ -1,4 +1,9 @@
 """OCR subpackage."""
-from .engine import OcrEngine, preprocess, build_engine
+from .engine import (
+    CONFIDENCE_LEVELS, OcrEngine, build_engine, conf_level, level_floor, preprocess,
+)
 
-__all__ = ["OcrEngine", "preprocess", "build_engine"]
+__all__ = [
+    "OcrEngine", "preprocess", "build_engine",
+    "conf_level", "level_floor", "CONFIDENCE_LEVELS",
+]

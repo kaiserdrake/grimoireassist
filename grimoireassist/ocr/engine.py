@@ -36,20 +36,39 @@ def preprocess(crop: np.ndarray) -> np.ndarray:
     return thr
 
 
+# Confidence levels for detected text (EasyOCR confidence is 0..1).
+CONFIDENCE_LEVELS = ("high", "mid", "low")
+_LEVEL_FLOOR = {"high": 0.85, "mid": 0.60, "low": 0.0}
+
+
+def conf_level(conf: float) -> str:
+    """Bucket an OCR confidence into 'high' / 'mid' / 'low'."""
+    if conf >= _LEVEL_FLOOR["high"]:
+        return "high"
+    if conf >= _LEVEL_FLOOR["mid"]:
+        return "mid"
+    return "low"
+
+
+def level_floor(level: str) -> float:
+    """Minimum confidence required for a given level (for filtering)."""
+    return _LEVEL_FLOOR.get(level, 0.0)
+
+
 class OcrEngine(ABC):
     @abstractmethod
     def read_text(self, image: np.ndarray) -> str:
         """Return concatenated recognised text for an already-cropped region."""
         raise NotImplementedError
 
-    def read_lines(self, image: np.ndarray) -> List[str]:
-        """Return individual text detections (e.g. one per monster name).
+    def read_lines(self, image: np.ndarray) -> List[tuple]:
+        """Return [(text, confidence), ...] — one entry per detected line.
 
-        Default splits read_text on newlines; engines that can return separate
-        detections should override this.
+        Default splits read_text on newlines (confidence 1.0); engines that can
+        return real per-detection confidence should override this.
         """
         text = self.read_text(image)
-        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+        return [(ln.strip(), 1.0) for ln in text.splitlines() if ln.strip()]
 
 
 def build_engine(name: str, languages: List[str], gpu: bool = False) -> OcrEngine:

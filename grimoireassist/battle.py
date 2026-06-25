@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from .config import Config, Region
-from .ocr import OcrEngine
+from .ocr import OcrEngine, conf_level, level_floor
 
 
 class BattleState(Enum):
@@ -49,22 +49,27 @@ def canonicalize(text: str, known_names: List[str], cutoff: float = 0.6) -> str:
     return text.strip()
 
 
-def match_known(text: str, known_names: List[str], cutoff: float = 0.6) -> Optional[str]:
+def match_known(text: str, known_names: List[str], cutoff: float = 0.7) -> Optional[str]:
     """Return the known monster name matching `text`, or None if it isn't close to any.
 
-    Unlike `canonicalize`, this REJECTS text that doesn't resemble a real monster, so OCR
-    noise during animations never becomes a fake monster. With no known list, accepts the
-    raw text (best effort)."""
+    Unlike `canonicalize`, this REJECTS text that doesn't resemble a real monster, so UI
+    menu text ("Set Red Pin", "Red", …) and animation noise never become a fake monster.
+    A length guard additionally rejects short fragments matching longer names (e.g.
+    "Red" -> "Rey Dau"). With no known list, accepts the raw text (best effort)."""
     t = _norm(text)
     if not t:
         return None
     if not known_names:
         return text.strip() or None
     match = difflib.get_close_matches(t, [_norm(n) for n in known_names], n=1, cutoff=cutoff)
-    if match:
-        for n in known_names:
-            if _norm(n) == match[0]:
-                return n
+    if not match:
+        return None
+    best = match[0]
+    if len(t) < 0.5 * len(best):   # text far shorter than the name -> not a real read
+        return None
+    for n in known_names:
+        if _norm(n) == best:
+            return n
     return None
 
 
@@ -77,29 +82,31 @@ class MonsterTracker:
     clears promptly once the fight is over.
     """
 
-    def __init__(self, known_names: Optional[List[str]] = None,
-                 persist_seconds: float = 5.0, end_persist_seconds: float = 1.0) -> None:
-        self.known_names = known_names or []
+    def __init__(self, persist_seconds: float = 12.0,
+                 end_persist_seconds: float = 1.0) -> None:
         self.persist_seconds = persist_seconds
         self.end_persist_seconds = end_persist_seconds
         self._seen: Dict[str, float] = {}     # name -> last_seen_time (insertion-ordered)
-        self._last_found: List[str] = []      # matched names from the most recent OCR
-        self._emitted: List[str] = []
-        self.on_changed: Optional[Callable[[List[str]], None]] = None
+        self._conf: Dict[str, float] = {}     # name -> latest confidence
+        self._last_found: List[str] = []      # names from the most recent OCR
+        self._emitted_sig: List[tuple] = []   # [(norm_name, level)] for change detection
+        self.on_changed: Optional[Callable[[list], None]] = None
 
-    def observe(self, names: List[str], now: float) -> None:
-        """A fresh OCR read: record matched monsters as seen 'now'."""
+    def observe(self, detections, now: float) -> None:
+        """A fresh OCR read. `detections` = [(name, confidence)] already matched + filtered.
+
+        Confidence is kept at the MAXIMUM seen while the monster is tracked, so the pill
+        colour only ever rises (e.g. low -> high) and never flickers back down until the
+        monster is cleared (expired)."""
         found, seen_keys = [], set()
-        for raw in names:
-            n = match_known(raw, self.known_names)
-            if n:
-                key = _norm(n)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    found.append(n)
+        for name, conf in detections:
+            key = _norm(name)
+            self._conf[name] = max(self._conf.get(name, 0.0), conf)
+            self._seen[name] = now
+            if key not in seen_keys:
+                seen_keys.add(key)
+                found.append(name)
         self._last_found = found
-        for n in found:
-            self._seen[n] = now
 
     def touch(self, now: float) -> None:
         """Region unchanged since last OCR — the last-found monsters are still on screen."""
@@ -111,14 +118,17 @@ class MonsterTracker:
         persist = self.end_persist_seconds if end_detected else self.persist_seconds
         for n in [k for k, t in list(self._seen.items()) if now - t > persist]:
             del self._seen[n]
+            self._conf.pop(n, None)
 
-    def current(self) -> List[str]:
-        return list(self._seen.keys())
+    def current(self) -> list:
+        """Return [(name, confidence), ...] for the currently-tracked monsters."""
+        return [(n, self._conf.get(n, 1.0)) for n in self._seen]
 
     def emit_if_changed(self) -> None:
         cur = self.current()
-        if [_norm(n) for n in cur] != [_norm(n) for n in self._emitted]:
-            self._emitted = list(cur)
+        sig = [(_norm(n), conf_level(c)) for n, c in cur]
+        if sig != self._emitted_sig:
+            self._emitted_sig = sig
             if self.on_changed:
                 self.on_changed(list(cur))
 
@@ -290,7 +300,6 @@ try:
             self._end_ocr_t = 0.0
             self._end_cached = False
             self.tracker = MonsterTracker(
-                known_names=cfg.monster_name_list,
                 persist_seconds=cfg.ocr.monster_persist_s,
                 end_persist_seconds=cfg.ocr.monster_persist_end_s,
             )
@@ -375,15 +384,23 @@ try:
                     changed = self._region_changed(sig)
                     due = (t0 - self._last_ocr_t) >= self._HEARTBEAT_S
                     if changed or due:
-                        names: list = []
+                        raw_lines: list = []  # [(text, conf)]
                         for region in self.cfg.ocr.regions_monster_names:
                             crop = self._crop(frame, region)
                             if crop is not None:
-                                names.extend(self.engine.read_lines(crop))
+                                raw_lines.extend(self.engine.read_lines(crop))
+                        # match to real monsters and filter by the min confidence level
+                        floor = level_floor(self.cfg.ocr.min_confidence_level)
+                        cutoff = self.cfg.ocr.match_cutoff
+                        dets = []  # [(name, conf)]
+                        for text, conf in raw_lines:
+                            name = match_known(text, self.cfg.monster_name_list, cutoff=cutoff)
+                            if name and conf >= floor:
+                                dets.append((name, conf))
                         self._last_sig = sig
                         self._last_ocr_t = t0
-                        self.tracker.observe(names, t0)
-                        self.debug_text.emit("", names)
+                        self.tracker.observe(dets, t0)
+                        self.debug_text.emit("", [n for n, _ in dets])
                     else:
                         self.tracker.touch(t0)
                     # Retention shrinks while the Battle-End banner is showing.

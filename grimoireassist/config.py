@@ -55,6 +55,8 @@ class OcrConfig:
     continuous: bool = True  # vestigial; monster detection is always on
     monster_persist_s: float = 12.0      # keep a monster this long after it's last seen
     monster_persist_end_s: float = 1.0   # shorter retention while "Battle End" text shows
+    min_confidence_level: str = "low"    # high|mid|low — minimum OCR confidence to track
+    match_cutoff: float = 0.7            # fuzzy-match strictness (higher = stricter)
     # active per-game values (populated at runtime, not serialized here)
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
     regions_battle_end: Region = field(default_factory=Region)
@@ -152,6 +154,8 @@ class Config:
                 continuous=bool(ocr.get("continuous", True)),
                 monster_persist_s=float(ocr.get("monster_persist_s", 12.0)),
                 monster_persist_end_s=float(ocr.get("monster_persist_end_s", 1.0)),
+                min_confidence_level=str(ocr.get("min_confidence_level", "low")),
+                match_cutoff=float(ocr.get("match_cutoff", 0.7)),
             ),
             ui=UiConfig(always_on_top=bool(ui.get("always_on_top", False))),
             selected_game=selected_game,
@@ -210,6 +214,8 @@ class Config:
                 "continuous": self.ocr.continuous,
                 "monster_persist_s": self.ocr.monster_persist_s,
                 "monster_persist_end_s": self.ocr.monster_persist_end_s,
+                "min_confidence_level": self.ocr.min_confidence_level,
+                "match_cutoff": self.ocr.match_cutoff,
             },
             "ui": {"always_on_top": self.ui.always_on_top},
             "games": {

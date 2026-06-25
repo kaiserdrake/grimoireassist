@@ -35,11 +35,18 @@ class EasyOcrEngine(OcrEngine):
         return " ".join(results).strip()
 
     def read_lines(self, image: np.ndarray) -> list:
-        """Return each detected text block separately (one per monster name)."""
+        """Return [(text, confidence), ...] — one per detected block (monster name)."""
         if image is None or image.size == 0:
             return []
         reader = self._ensure_reader()
         prepped = preprocess(image)
-        results = reader.readtext(prepped, detail=0, paragraph=False,
+        # detail=1 -> (bbox, text, confidence); paragraph must be False for confidence
+        results = reader.readtext(prepped, detail=1, paragraph=False,
                                   canvas_size=self._CANVAS, mag_ratio=self._MAG)
-        return [r.strip() for r in results if r and r.strip()]
+        out = []
+        for item in results:
+            text = (item[1] or "").strip()
+            conf = float(item[2]) if len(item) > 2 else 1.0
+            if text:
+                out.append((text, conf))
+        return out

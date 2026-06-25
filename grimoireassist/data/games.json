@@ -2,8 +2,11 @@
   {
     "id": "mhs3",
     "name": "MH Stories 3: Twisted Reflection",
-    "site_url_template": "https://monsterbuddy.app/3/monsters/{name}",
-    "monsters": "monsters_3"
+    "site_url_template": "https://grimoire.laeradsphere.com/game/236/258/notes?fileId=14&st1={name}",
+    "monsters": "monsters_3",
+    "url_style": "search",
+    "requires_login": true,
+    "notes_url": "https://grimoire.laeradsphere.com/game/236/258/notes?fileId=14"
   },
   {
     "id": "mhs2",

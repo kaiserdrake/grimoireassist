@@ -24,7 +24,7 @@ from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
-from .monster_panel import MonsterNav, MonsterPanel
+from .monster_panel import MonsterNav, MonsterPanel, ViewModeSwitch
 
 
 class MainWindow(QMainWindow):
@@ -45,6 +45,8 @@ class MainWindow(QMainWindow):
         self.worker: Optional[OcrWorker] = None
         self.panel: Optional[MonsterPanel] = None
         self.game: Optional[GameInfo] = None
+        self._auto_switch = True            # Auto Switch vs Grimoire-locked
+        self._detections: list = []         # latest [(name, confidence)]
 
         self._build_menu()
         self._build_statusbar()
@@ -92,9 +94,11 @@ class MainWindow(QMainWindow):
 
         # (re)build panel for this game's site + slugs
         self.model = OverlayModel()
-        if self.cfg.ocr.continuous:
-            self.model.status_text = "Tracking areas..."
-        self.panel = MonsterPanel(game.site_url_template, slug_map=slug_map(game.monsters))
+        self._detections = []
+        self.panel = MonsterPanel(
+            game.site_url_template, slug_map=slug_map(game.monsters),
+            url_style=game.url_style, multi_joiner=game.multi_joiner,
+            requires_login=game.requires_login, notes_url=game.notes_url)
         self.setCentralWidget(self.panel)
         self._refresh_panel()
 
@@ -142,6 +146,18 @@ class MainWindow(QMainWindow):
         self.act_gpu.setCheckable(True)
         self.act_gpu.setChecked(self.cfg.ocr.gpu)
         self.act_gpu.toggled.connect(self._toggle_gpu)
+        # minimum OCR confidence required to track a monster
+        conf_menu = self.menu.addMenu("Track confidence")
+        conf_group = QActionGroup(conf_menu)
+        conf_group.setExclusive(True)
+        for level, label in (("low", "Low and up (all)"), ("mid", "Mid and up"),
+                             ("high", "High only")):
+            act = QAction(label, conf_menu)
+            act.setCheckable(True)
+            act.setChecked(self.cfg.ocr.min_confidence_level == level)
+            act.triggered.connect(lambda _c, lv=level: self._set_min_confidence(lv))
+            conf_group.addAction(act)
+            conf_menu.addAction(act)
         self.act_on_top = self.menu.addAction("Always on top")
         self.act_on_top.setCheckable(True)
         self.act_on_top.setChecked(self.cfg.ui.always_on_top)
@@ -167,16 +183,11 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
 
-        self.grimoire_btn = QToolButton()
-        self.grimoire_btn.setText("\U0001f52e")
-        self.grimoire_btn.setToolTip("Toggle Grimoire tracker")
-        self.grimoire_btn.setCheckable(True)
-        self.grimoire_btn.setStyleSheet(
-            "QToolButton { font-size:16px; padding:2px 32px; }"
-            "QToolButton:checked { background:#5b3fa6; border-radius:4px; color:#fff; }"
-        )
-        self.grimoire_btn.clicked.connect(self._toggle_grimoire)
-        tb.addWidget(self.grimoire_btn)
+        # View-mode switch: Auto Switch (auto transition) vs Grimoire (locked).
+        self.view_switch = ViewModeSwitch()
+        self.view_switch.set_mode("auto" if self._auto_switch else "grimoire")
+        self.view_switch.mode_changed.connect(self._on_view_mode)
+        tb.addWidget(self.view_switch)
 
     def _on_monster_selected(self, name: str) -> None:
         if self.panel is not None:
@@ -265,13 +276,25 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(flags)
         self.show()
 
-    # ================= grimoire toggle =================
-    def _toggle_grimoire(self, checked: bool) -> None:
-        self._set_grimoire(checked)
-        if checked:
+    # ================= view mode (auto-switch vs grimoire) =================
+    def _on_view_mode(self, mode: str) -> None:
+        self._auto_switch = (mode == "auto")
+        if mode == "grimoire":
+            # lock to the Grimoire view; no auto transitions
             self._cancel_idle()
-        elif not self.model.monsters:
-            self._start_idle()
+            self._set_grimoire(True)
+        else:
+            # auto: re-evaluate the view from the current detections
+            if self._detections:
+                self._cancel_idle()
+                self._set_grimoire(False)
+            else:
+                self._start_idle()
+
+    def _set_min_confidence(self, level: str) -> None:
+        self.cfg.ocr.min_confidence_level = level
+        self.cfg.save()
+        self.statusBar().showMessage(f"Tracking confidence: {level} and up", 3000)
 
     # ================= fullscreen =================
     def _toggle_fullscreen(self) -> None:
@@ -320,9 +343,11 @@ class MainWindow(QMainWindow):
             self.nav.set_tracking("Idle", None)
 
     def _refresh_panel(self) -> None:
-        # monster buttons live in the navbar; the panel shows the page. The source/
-        # tracking pills are driven separately by _refresh_status.
-        self.nav.set_monsters(self.model.monsters)
+        # navbar shows the confidence-coloured buttons; the panel shows the page for
+        # all detected monsters at once (source/tracking pills come from _refresh_status).
+        self.nav.set_monsters(self._detections)
+        if self.panel:
+            self.panel.show_monsters([n for n, _ in self._detections])
 
     def _on_battle_started(self) -> None:
         self.model.battle_started()
@@ -332,9 +357,14 @@ class MainWindow(QMainWindow):
         self.model.battle_ended()
         self._refresh_panel()
 
-    def _on_monsters_changed(self, names: List[str]) -> None:
+    def _on_monsters_changed(self, detections: list) -> None:
+        # detections = [(name, confidence)]
+        self._detections = detections
+        names = [n for n, _ in detections]
         self.model.set_monsters(names)
         self._refresh_panel()
+        if not self._auto_switch:
+            return  # locked to Grimoire; navbar still updates, view doesn't switch
         if names:
             self._cancel_idle()
             # monsters detected — switch back to OCR view
@@ -369,7 +399,8 @@ class MainWindow(QMainWindow):
             self._idle_timer.stop()
             if self.panel:
                 self.panel.set_countdown(None)
-            self._set_grimoire(True)
+            if self._auto_switch:
+                self._set_grimoire(True)
         else:
             self._update_countdown()
 
@@ -379,7 +410,6 @@ class MainWindow(QMainWindow):
             self.panel.set_countdown(remaining)
 
     def _set_grimoire(self, visible: bool) -> None:
-        self.grimoire_btn.setChecked(visible)
         if self.panel:
             self.panel.set_grimoire_visible(visible)
 
