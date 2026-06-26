@@ -1,13 +1,13 @@
 selected_game: mhs3
 capture:
-  device_index: 1
+  device_index: 0
   width: 1920
   height: 1080
   fps: 30
 virtual_camera:
-  enabled: true
+  enabled: false
 ocr:
-  engine: easyocr
+  engine: auto
   poll_fps: 3.0
   languages:
   - en
@@ -24,10 +24,10 @@ games:
   mhs3:
     regions:
       monster_names:
-      - x: 217
-        y: 21
-        w: 1665
-        h: 136
+      - x: 287
+        y: 529
+        w: 799
+        h: 181
       battle_end:
         x: 14
         y: 14

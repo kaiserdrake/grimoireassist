@@ -6,11 +6,13 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+import threading
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QLabel, QMainWindow, QMenu, QMessageBox, QSizePolicy, QToolBar, QToolButton,
-    QWidget,
+    QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+    QSizePolicy, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..battle import OcrWorker
@@ -47,10 +49,13 @@ class MainWindow(QMainWindow):
         self.game: Optional[GameInfo] = None
         self._auto_switch = True            # Auto Switch vs Grimoire-locked
         self._detections: list = []         # latest [(name, confidence)]
+        self._tracking_active = False       # OCR worker only runs when user starts it
 
         self._build_menu()
         self._build_statusbar()
         self._build_shortcuts()
+        self._debug_widget = self._build_debug_panel()
+        self._debug_widget.setVisible(False)
 
         # capture is global (one camera feeds every game)
         self._start_capture(cfg.capture.device_index)
@@ -62,9 +67,14 @@ class MainWindow(QMainWindow):
         if cfg.ui.always_on_top:
             self._apply_on_top(True)
 
+        # Pre-warm the OCR engine in the background so the first Start click is
+        # instant. The button is disabled until the model finishes loading.
+        self._start_warmup()
+
         # camera-health tracking (drives the error status)
-        self._last_seq = -1
-        self._camera_ok = True
+        self._last_seq = 0   # 0 matches the buffer's initial seq, avoiding a false
+        self._camera_ok = False  # "Source Active" on the very first timer tick
+        self._flow_streak = 0    # consecutive ticks with same flowing state (debounce)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_status)
@@ -99,11 +109,24 @@ class MainWindow(QMainWindow):
             game.site_url_template, slug_map=slug_map(game.monsters),
             url_style=game.url_style, multi_joiner=game.multi_joiner,
             requires_login=game.requires_login, notes_url=game.notes_url)
-        self.setCentralWidget(self.panel)
+        # Wrap panel + debug log in a single container so the debug log
+        # appears below the monster panel without replacing it.
+        wrapper = QWidget()
+        wlay = QVBoxLayout(wrapper)
+        wlay.setContentsMargins(0, 0, 0, 0)
+        wlay.setSpacing(0)
+        wlay.addWidget(self.panel, 1)
+        wlay.addWidget(self._debug_widget)
+        self.setCentralWidget(wrapper)
         self._refresh_panel()
 
-        # (re)start OCR worker with the new game's name list / regions
-        self._start_worker()
+        # Only (re)start the OCR worker if tracking was already active.
+        # On first load _tracking_active is False, so we wait for the user
+        # to press Start before burning CPU on inference.
+        if self._tracking_active:
+            self._start_worker()
+        else:
+            self._stop_worker()
 
     def _start_worker(self) -> None:
         if self.worker is not None:
@@ -117,8 +140,26 @@ class MainWindow(QMainWindow):
         self.worker.monster_killed.connect(self._on_monster_killed)
         self.worker.battle_started.connect(self._on_battle_started)
         self.worker.battle_ended.connect(self._on_battle_ended)
-        self.worker.error.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.worker.error.connect(self._on_ocr_error)
+        self.worker.debug_text.connect(self._on_debug_text)
         self.worker.start()
+
+    def _stop_worker(self) -> None:
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker.wait(1500)
+            self.worker = None
+        self._detections = []
+        self.model = OverlayModel()
+        self._refresh_panel()
+
+    def _toggle_tracking(self) -> None:
+        self._tracking_active = not self._tracking_active
+        if self._tracking_active:
+            self._start_worker()
+        else:
+            self._stop_worker()
+        self._update_tracking_btn()
 
     def _switch_game(self) -> None:
         dlg = GameSelectDialog(list(load_catalog()),
@@ -167,6 +208,11 @@ class MainWindow(QMainWindow):
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
         self.menu.addSeparator()
         self.menu.addAction("Switch game…", self._switch_game)
+        self.menu.addSeparator()
+        self.act_debug = self.menu.addAction("Show OCR debug log")
+        self.act_debug.setCheckable(True)
+        self.act_debug.setChecked(False)
+        self.act_debug.toggled.connect(self._toggle_debug)
         self.menu.aboutToShow.connect(self._populate_camera_menu)
 
         self.menu_btn.setMenu(self.menu)
@@ -183,21 +229,100 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
 
+        # Start / Stop tracking button.
+        self.tracking_btn = QToolButton()
+        self.tracking_btn.setCheckable(True)
+        self.tracking_btn.setChecked(False)
+        self.tracking_btn.clicked.connect(self._toggle_tracking)
+        self._update_tracking_btn()
+        tb.addWidget(self.tracking_btn)
+        tb.addSeparator()
+
         # View-mode switch: Auto Switch (auto transition) vs Grimoire (locked).
         self.view_switch = ViewModeSwitch()
         self.view_switch.set_mode("auto" if self._auto_switch else "grimoire")
         self.view_switch.mode_changed.connect(self._on_view_mode)
         tb.addWidget(self.view_switch)
 
+    def _start_warmup(self) -> None:
+        """Pre-load the OCR model in the background. Start is always enabled
+        immediately — warmup only speeds up the first inference, it is never a gate."""
+        engine_name = type(self.engine).__name__.replace("Engine", "")
+        self.statusBar().showMessage(f"OCR engine: {engine_name}")
+
+        if getattr(self.engine, "ready", True):
+            return  # already ready (Tesseract etc.), nothing to pre-load
+
+        self.statusBar().showMessage(
+            f"Pre-loading {engine_name} model in background…"
+            " (first OCR may be slow if not done)")
+
+        def _load():
+            try:
+                self.engine.warmup()
+            except Exception as exc:
+                QTimer.singleShot(0, lambda: self.statusBar().showMessage(
+                    f"{engine_name} model load failed: {exc}", 6000))
+                return
+            QTimer.singleShot(0, lambda: self.statusBar().showMessage(
+                f"{engine_name} model ready", 3000))
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _update_tracking_btn(self) -> None:
+        if self._tracking_active:
+            self.tracking_btn.setText("■ Stop")
+            self.tracking_btn.setToolTip("Stop OCR tracking")
+            self.tracking_btn.setStyleSheet(
+                "QToolButton { background:#8b2020; color:#fff; border:none;"
+                " border-radius:4px; padding:4px 10px; font-size:13px; font-weight:600; }"
+                "QToolButton:hover { background:#a02828; }")
+        else:
+            self.tracking_btn.setText("▶ Start")
+            self.tracking_btn.setToolTip("Start OCR tracking")
+            self.tracking_btn.setStyleSheet(
+                "QToolButton { background:#2e9e54; color:#fff; border-radius:4px;"
+                " padding:4px 10px; font-size:13px; font-weight:600; }"
+                "QToolButton:hover { background:#37b862; }")
+        self.tracking_btn.setChecked(self._tracking_active)
+
     def _on_monster_selected(self, name: str) -> None:
         if self.panel is not None:
             self.panel.show_monster(name)
 
     def _populate_camera_menu(self) -> None:
+        # DirectShow device enumeration can block for several seconds on Windows
+        # — run it on a background thread and rebuild the menu when done.
+        self.camera_menu.clear()
+        self.camera_menu.addAction("Scanning devices…").setEnabled(False)
+
+        def _scan():
+            # COM must be initialised on each thread that calls DirectShow.
+            try:
+                import ctypes
+                ctypes.windll.ole32.CoInitializeEx(None, 0)
+            except Exception:
+                pass
+            try:
+                devices = list_named_devices()
+            except Exception:
+                devices = []
+            finally:
+                try:
+                    import ctypes
+                    ctypes.windll.ole32.CoUninitialize()
+                except Exception:
+                    pass
+            # Qt widgets must only be touched from the main thread.
+            QTimer.singleShot(0, lambda: self._rebuild_camera_menu(devices))
+
+        threading.Thread(target=_scan, daemon=True).start()
+
+    def _rebuild_camera_menu(self, devices: list) -> None:
         self.camera_menu.clear()
         group = QActionGroup(self.camera_menu)
         group.setExclusive(True)
-        for idx, name in list_named_devices():
+        for idx, name in devices:
             if "obs virtual camera" in name.lower():
                 continue
             act = QAction(f"{name}  (#{idx})", self.camera_menu)
@@ -217,6 +342,102 @@ class MainWindow(QMainWindow):
     def _build_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
+
+    # ================= debug log =================
+    def _open_log_file(self):
+        """Return an open append-mode file handle for the session log, creating it once."""
+        if getattr(self, "_log_fh", None) is None:
+            import datetime
+            from pathlib import Path
+            log_dir = Path(self.cfg._path).parent / "logs" if self.cfg._path else Path("logs")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = log_dir / f"ocr_{ts}.log"
+            self._log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+            self._log_path = log_path
+            self.statusBar().showMessage(f"Logging to {log_path}", 4000)
+        return self._log_fh
+
+    def _build_debug_panel(self) -> QWidget:
+        container = QWidget()
+        container.setStyleSheet("QWidget { background:#0d0d12; }")
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+
+        from PyQt6.QtWidgets import QHBoxLayout
+        row = QWidget()
+        rlay = QHBoxLayout(row)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel("OCR Debug Log")
+        lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
+        rlay.addWidget(lbl)
+        rlay.addStretch()
+        open_btn = QPushButton("Open log")
+        open_btn.setFixedWidth(70)
+        open_btn.setStyleSheet(
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }")
+        open_btn.clicked.connect(self._open_log_folder)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(54)
+        clear_btn.setStyleSheet(
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }")
+        rlay.addWidget(open_btn)
+        rlay.addWidget(clear_btn)
+        lay.addWidget(row)
+
+        self._debug_log = QPlainTextEdit()
+        self._debug_log.setReadOnly(True)
+        self._debug_log.setMaximumBlockCount(200)
+        self._debug_log.setStyleSheet(
+            "QPlainTextEdit { background:#0d0d12; color:#c8ffc8;"
+            " font-family: Consolas, monospace; font-size:11px; border:none; }")
+        self._debug_log.setFixedHeight(130)
+        clear_btn.clicked.connect(self._debug_log.clear)
+        lay.addWidget(self._debug_log)
+        return container
+
+    def _open_log_folder(self) -> None:
+        import subprocess
+        from pathlib import Path
+        log_fh = getattr(self, "_log_fh", None)
+        if log_fh:
+            subprocess.Popen(["explorer", "/select,", str(self._log_path)])
+        else:
+            from pathlib import Path
+            log_dir = Path(self.cfg._path).parent / "logs" if self.cfg._path else Path("logs")
+            subprocess.Popen(["explorer", str(log_dir)])
+
+    def _on_ocr_error(self, msg: str) -> None:
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.statusBar().showMessage(msg.splitlines()[0], 5000)
+        try:
+            self._open_log_file().write(f"[{ts}] ERROR: {msg}\n")
+        except Exception:
+            pass
+
+    def _toggle_debug(self, visible: bool) -> None:
+        self._debug_widget.setVisible(visible)
+
+    def _log_line(self, line: str) -> None:
+        """Write one line to both the on-screen widget and the log file."""
+        self._debug_log.appendPlainText(line)
+        try:
+            self._open_log_file().write(line + "\n")
+        except Exception:
+            pass
+
+    def _on_debug_text(self, raw: str, monsters: list) -> None:
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        matched = ", ".join(monsters) if monsters else "—"
+        self._log_line(f"[{ts}]  raw:     {raw}")
+        self._log_line(f"         matched: {matched}")
 
     # ================= ocr engine =================
     def _toggle_gpu(self, checked: bool) -> None:
@@ -258,6 +479,11 @@ class MainWindow(QMainWindow):
             video_file=self.cfg.capture.video_file,
         )
         self.capture.start()
+        # Reset flow-detection state so the debounce starts fresh for this device.
+        self._last_seq = self.buffer.current_seq()
+        self._last_flowing = False
+        self._flow_streak = 0
+        self._camera_ok = False
         src = self.cfg.capture.video_file or f"device {device_index}"
         self.statusBar().showMessage(f"Capturing from {src}", 3000)
 
@@ -323,24 +549,35 @@ class MainWindow(QMainWindow):
     # ================= loops / signals =================
     def _refresh_status(self) -> None:
         self._update_vcam_label()
-        # Detect whether frames are actually arriving from the camera, and reflect
-        # source + tracking state in the navbar pills.
         seq = self.buffer.current_seq()
         flowing = seq != self._last_seq
         self._last_seq = seq
-        err = self.capture.last_error if self.capture else None
-        if flowing:
-            self.nav.set_source("Source Active", True)
-            self.nav.set_tracking("Tracking", self.worker is not None)
-            self._camera_ok = True
+
+        # Debounce: _flow_streak counts consecutive ticks of the same `flowing`
+        # value. Only update _camera_ok after 2 in a row so a single dropped/
+        # spurious frame doesn't flip the pill.
+        if flowing == getattr(self, "_last_flowing", None):
+            self._flow_streak = min(self._flow_streak + 1, 4)
         else:
-            self._camera_ok = False
+            self._flow_streak = 1
+        self._last_flowing = flowing
+        if self._flow_streak >= 2:
+            self._camera_ok = flowing
+
+        err = self.capture.last_error if self.capture else None
+        if self._camera_ok:
+            self.nav.set_source("Source Active", True)
+            if self._tracking_active:
+                self.nav.set_tracking("Tracking", True)
+            else:
+                self.nav.set_tracking("Stopped", False)
+        else:
             if err:
                 self.nav.set_source("No Source", False)
                 self.statusBar().showMessage(f"Camera: {err}", 2000)
             else:
                 self.nav.set_source("Connecting…", None)
-            self.nav.set_tracking("Idle", None)
+            self.nav.set_tracking("Stopped" if not self._tracking_active else "Idle", None)
 
     def _refresh_panel(self) -> None:
         # navbar shows the confidence-coloured buttons; the panel shows the page for
@@ -379,7 +616,7 @@ class MainWindow(QMainWindow):
             self._start_idle()
 
     # ================= idle / auto-switch =================
-    _IDLE_TIMEOUT = 16
+    _IDLE_TIMEOUT = 4
 
     def _start_idle(self) -> None:
         if not self._idle_timer.isActive():
@@ -443,4 +680,6 @@ class MainWindow(QMainWindow):
             self.capture.join(timeout=1.5)
         if self.vcam:
             self.vcam.close()
+        if getattr(self, "_log_fh", None):
+            self._log_fh.close()
         super().closeEvent(event)

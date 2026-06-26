@@ -7,6 +7,19 @@ from typing import List
 import cv2
 import numpy as np
 
+# OpenCV lazily loads IPP and OpenCL DLLs on the first call from each thread.
+# On Windows those DLLs fail to initialise inside a QThread (ERROR_DLL_INIT_FAILED
+# / WinError 1114).  Disabling both acceleration paths here — at import time, in
+# the main thread — prevents cv2 from ever attempting those lazy loads.
+try:
+    cv2.setUseOptimized(False)   # disables IPP / MKL paths
+    cv2.ocl.setUseOpenCL(False)  # disables OpenCL
+    # Prime cv2 with a trivial operation so all its DLLs are loaded now,
+    # in the main thread, before any QThread calls cv2 for the first time.
+    cv2.cvtColor(np.zeros((4, 4, 3), dtype=np.uint8), cv2.COLOR_BGR2GRAY)
+except Exception:
+    pass
+
 
 # Keep OCR cheap WITHOUT hurting accuracy: cap the longest side (so a wide region
 # isn't blown up to 4000px+), and only upscale genuinely small regions. We do NOT
@@ -56,6 +69,11 @@ def level_floor(level: str) -> float:
 
 
 class OcrEngine(ABC):
+    ready: bool = True  # subclasses with lazy loading override this
+
+    def warmup(self) -> None:
+        """Pre-load the model (call once from a background thread at startup)."""
+
     @abstractmethod
     def read_text(self, image: np.ndarray) -> str:
         """Return concatenated recognised text for an already-cropped region."""
@@ -72,11 +90,25 @@ class OcrEngine(ABC):
 
 
 def build_engine(name: str, languages: List[str], gpu: bool = False) -> OcrEngine:
-    name = (name or "easyocr").lower()
-    if name == "easyocr":
+    """Construct the requested OCR engine, falling back automatically if unavailable.
+
+    Priority when name == "auto" (or unrecognised):
+      1. Tesseract  — instant startup, low CPU, good for clear game text
+      2. EasyOCR   — higher accuracy but requires a 200 MB model download + PyTorch
+    """
+    name = (name or "auto").lower()
+
+    if name in ("tesseract", "auto"):
+        try:
+            from .tesseract_engine import TesseractEngine
+            return TesseractEngine(languages=languages)
+        except Exception:
+            if name == "tesseract":
+                raise
+            # fall through to EasyOCR
+
+    if name in ("easyocr", "auto"):
         from .easyocr_engine import EasyOcrEngine
         return EasyOcrEngine(languages=languages, gpu=gpu)
-    if name == "tesseract":
-        from .tesseract_engine import TesseractEngine
-        return TesseractEngine(languages=languages)
-    raise ValueError(f"Unknown OCR engine: {name}")
+
+    raise ValueError(f"Unknown OCR engine: {name!r}")

@@ -300,8 +300,8 @@ try:
             self._end_ocr_t = 0.0
             self._end_cached = False
             self.tracker = MonsterTracker(
-                persist_seconds=cfg.ocr.monster_persist_s,
-                end_persist_seconds=cfg.ocr.monster_persist_end_s,
+                persist_seconds=cfg.effective_monster_persist_s(),
+                end_persist_seconds=cfg.effective_monster_persist_end_s(),
             )
             self.tracker.on_changed = self.monsters_changed.emit
 
@@ -384,6 +384,11 @@ try:
                     changed = self._region_changed(sig)
                     due = (t0 - self._last_ocr_t) >= self._HEARTBEAT_S
                     if changed or due:
+                        # Emit a one-shot warning if the GPU engine silently fell back.
+                        warn = getattr(self.engine, "gpu_warning", None)
+                        if warn:
+                            self.error.emit(f"⚠ {warn}")
+                            self.engine.gpu_warning = None
                         raw_lines: list = []  # [(text, conf)]
                         for region in self.cfg.ocr.regions_monster_names:
                             crop = self._crop(frame, region)
@@ -400,7 +405,10 @@ try:
                         self._last_sig = sig
                         self._last_ocr_t = t0
                         self.tracker.observe(dets, t0)
-                        self.debug_text.emit("", [n for n, _ in dets])
+                        raw_str = "  |  ".join(
+                            f"{t} ({c:.0%})" for t, c in raw_lines
+                        ) if raw_lines else "—"
+                        self.debug_text.emit(raw_str, [n for n, _ in dets])
                     else:
                         self.tracker.touch(t0)
                     # Retention shrinks while the Battle-End banner is showing.
@@ -408,10 +416,20 @@ try:
                     self.tracker.expire(t0, end_detected)
                     self.tracker.emit_if_changed()
                 except Exception as exc:
-                    self.error.emit(f"OCR error: {exc}")
+                    import traceback
+                    self.error.emit(
+                        f"OCR error: {exc}\n{traceback.format_exc()}")
                 dt = time.time() - t0
-                if dt < interval:
-                    time.sleep(interval - dt)
+                # When inference is slower than the poll interval the naive
+                # `max(0, interval-dt)` collapses to zero and the loop spins at
+                # 100% CPU. Always sleep at least `interval` worth of wall-time
+                # since the last iteration started, so the effective OCR rate
+                # never exceeds poll_fps regardless of how slow inference is.
+                time.sleep(max(interval - dt, 0.0))
+                if dt > interval:
+                    # Over budget: park for one more interval so the total
+                    # cycle is ~2×interval and other threads get CPU time.
+                    time.sleep(interval)
 
 except ImportError:  # PyQt not available (e.g. headless unit tests)
     OcrWorker = None  # type: ignore

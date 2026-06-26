@@ -20,12 +20,15 @@ class VirtualCamSink:
     frame so downstream apps see a clean feed (no overlays).
     """
 
+    _RETRY_INTERVAL = 5.0  # seconds between open attempts after a failure
+
     def __init__(self, fps: int = 30) -> None:
         self.fps = fps
         self._cam: Optional["pyvirtualcam.Camera"] = None
         self._size: Optional[tuple[int, int]] = None
         self.available = _HAVE_PYVCAM
         self.last_error: Optional[str] = None
+        self._next_retry: float = 0.0
 
     def _ensure(self, width: int, height: int) -> bool:
         if not self.available:
@@ -33,6 +36,12 @@ class VirtualCamSink:
             return False
         if self._cam is not None and self._size == (width, height):
             return True
+        # Back off after a failure so we don't attempt to open the OBS virtual
+        # camera driver on every single frame (30×/sec) when it isn't running.
+        import time as _time
+        now = _time.monotonic()
+        if self._cam is None and now < self._next_retry:
+            return False
         self.close()
         try:
             self._cam = pyvirtualcam.Camera(
@@ -41,6 +50,7 @@ class VirtualCamSink:
             )
             self._size = (width, height)
             self.last_error = None
+            self._next_retry = 0.0
             return True
         except Exception as exc:
             self._cam = None
@@ -48,6 +58,7 @@ class VirtualCamSink:
                 f"Could not start virtual camera ({exc}). "
                 "Is the OBS Virtual Camera driver installed?"
             )
+            self._next_retry = now + self._RETRY_INTERVAL
             return False
 
     @property

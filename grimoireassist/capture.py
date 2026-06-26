@@ -112,6 +112,16 @@ class CaptureThread(threading.Thread):
         return cap
 
     def run(self) -> None:
+        # Initialize COM on this thread as MTA before touching any DirectShow
+        # (CAP_DSHOW) or pyvirtualcam objects. Without this, Windows auto-inits
+        # the thread as STA and marshals DirectShow calls back to the main thread's
+        # STA apartment, which blocks the Qt UI event loop.
+        try:
+            import ctypes
+            ctypes.windll.ole32.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED
+        except Exception:
+            pass
+
         backoff = 0.5
         frame_interval = 1.0 / max(1, self.fps)
         while not self._stop_event.is_set():
@@ -151,3 +161,8 @@ class CaptureThread(threading.Thread):
                 if dt < frame_interval:
                     time.sleep(frame_interval - dt)
             cap.release()
+        try:
+            import ctypes
+            ctypes.windll.ole32.CoUninitialize()
+        except Exception:
+            pass

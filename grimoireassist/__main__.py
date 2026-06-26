@@ -38,6 +38,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.device is not None:
         cfg.capture.device_index = args.device
 
+    # Pre-load torch DLLs (c10.dll, libgomp, MKL …) BEFORE PyQt6 loads its own
+    # copies of those same runtime DLLs.  On Windows, whichever library wins the
+    # DLL load-order race becomes the "owner" of those DLLs; the second loader
+    # (whichever arrives later, in a thread pool worker) gets WinError 1114.
+    # Importing torch here — in the main thread, before Qt — ensures torch's
+    # DLLs are registered first and the conflict never occurs.
+    try:
+        import torch as _torch  # noqa: F401
+    except Exception:
+        pass
+
     # Import Qt lazily so --list-devices works without a display.
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QColor, QPalette

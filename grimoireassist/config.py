@@ -47,7 +47,7 @@ _DEFAULT_END_KEYWORDS = ["result", "victory", "defeat"]
 
 @dataclass
 class OcrConfig:
-    engine: str = "easyocr"
+    engine: str = "auto"
     poll_fps: float = 3.0
     languages: List[str] = field(default_factory=lambda: ["en"])
     gpu: bool = False
@@ -70,6 +70,8 @@ class GameSettings:
     monster_names: List[Region] = field(default_factory=lambda: [Region()])
     battle_end: Region = field(default_factory=Region)
     end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
+    monster_persist_s: Optional[float] = None       # overrides ocr.monster_persist_s when set
+    monster_persist_end_s: Optional[float] = None   # overrides ocr.monster_persist_end_s when set
 
 
 @dataclass
@@ -101,6 +103,18 @@ class Config:
     def set_regions_for(self, game_id: str, settings: GameSettings) -> None:
         self.games[game_id] = settings
 
+    def effective_monster_persist_s(self) -> float:
+        gs = self.games.get(self.selected_game or "")
+        if gs and gs.monster_persist_s is not None:
+            return gs.monster_persist_s
+        return self.ocr.monster_persist_s
+
+    def effective_monster_persist_end_s(self) -> float:
+        gs = self.games.get(self.selected_game or "")
+        if gs and gs.monster_persist_end_s is not None:
+            return gs.monster_persist_end_s
+        return self.ocr.monster_persist_end_s
+
     # ---- loading -------------------------------------------------------
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -128,10 +142,14 @@ class Config:
             keywords = (g or {}).get("keywords", {})
             mons = regions.get("monster_names") or [{}]
             end_kw = [str(k) for k in (keywords.get("battle_end") or [])]
+            raw_persist = (g or {}).get("monster_persist_s")
+            raw_persist_end = (g or {}).get("monster_persist_end_s")
             games[gid] = GameSettings(
                 monster_names=[_region(r) for r in mons],
                 battle_end=_region(regions.get("battle_end")),
                 end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
+                monster_persist_s=float(raw_persist) if raw_persist is not None else None,
+                monster_persist_end_s=float(raw_persist_end) if raw_persist_end is not None else None,
             )
 
         selected_game = raw.get("selected_game")
@@ -225,6 +243,8 @@ class Config:
                         "battle_end": asdict(gs.battle_end),
                     },
                     "keywords": {"battle_end": gs.end_keywords},
+                    **({"monster_persist_s": gs.monster_persist_s} if gs.monster_persist_s is not None else {}),
+                    **({"monster_persist_end_s": gs.monster_persist_end_s} if gs.monster_persist_end_s is not None else {}),
                 }
                 for gid, gs in self.games.items()
             },
