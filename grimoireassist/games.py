@@ -72,6 +72,24 @@ def slug_map(monsters_file: str) -> Dict[str, str]:
     return {name: slug for name, slug in _load_monsters(monsters_file)}
 
 
+def monster_imported_data(game_id: str, config_path=None) -> dict:
+    """Return imported monster data for game_id, or {} if not yet imported.
+
+    Data lives at <config_dir>/imported/<game_id>/data.json and is produced
+    by the ImportWizard. Keys are monster names; special keys start with '_'.
+    """
+    if not config_path:
+        return {}
+    from pathlib import Path
+    data_file = Path(config_path).parent / "games" / game_id / "data.json"
+    if not data_file.exists():
+        return {}
+    try:
+        return json.loads(data_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def icon_path() -> str:
     """Filesystem path to the app icon (.ico), or '' if unavailable."""
     try:

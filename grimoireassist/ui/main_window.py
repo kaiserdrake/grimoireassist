@@ -19,13 +19,15 @@ from ..battle import OcrWorker
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
 from ..config import Config, GameSettings
 from ..games import (
-    GameInfo, get_game, default_game, icon_path, load_catalog, monster_names, slug_map,
+    GameInfo, get_game, default_game, icon_path, load_catalog,
+    monster_names, monster_imported_data, slug_map,
 )
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
+from .import_wizard import ImportWizard
 from .monster_panel import MonsterNav, MonsterPanel, ViewModeSwitch
 
 
@@ -105,10 +107,15 @@ class MainWindow(QMainWindow):
         # (re)build panel for this game's site + slugs
         self.model = OverlayModel()
         self._detections = []
+        from pathlib import Path as _Path
+        _imported = monster_imported_data(game.id, self.cfg._path)
+        _img_base = (_Path(self.cfg._path).parent / "games" / game.id
+                     if self.cfg._path else None)
         self.panel = MonsterPanel(
             game.site_url_template, slug_map=slug_map(game.monsters),
             url_style=game.url_style, multi_joiner=game.multi_joiner,
-            requires_login=game.requires_login, notes_url=game.notes_url)
+            requires_login=game.requires_login, notes_url=game.notes_url,
+            imported_data=_imported, image_base=_img_base)
         # Wrap panel + debug log in a single container so the debug log
         # appears below the monster panel without replacing it.
         wrapper = QWidget()
@@ -167,6 +174,35 @@ class MainWindow(QMainWindow):
         if dlg.exec() and dlg.selected and dlg.selected != self.cfg.selected_game:
             self._start_game(get_game(dlg.selected))
 
+    def _open_import_wizard(self) -> None:
+        if not self.game:
+            return
+        from pathlib import Path
+        save_dir = (Path(self.cfg._path).parent / "games" / self.game.id
+                    if self.cfg._path else Path("games") / self.game.id)
+        profile = getattr(self.panel, "_profile", None)
+        dlg = ImportWizard(
+            game_id=self.game.id,
+            notes_url=self.game.notes_url or self.game.site_url_template,
+            profile=profile,
+            save_dir=save_dir,
+            parent=self,
+        )
+        dlg.import_done.connect(self._on_import_done)
+        dlg.exec()
+
+    def _on_import_done(self, game_id: str) -> None:
+        if game_id != (self.game.id if self.game else None):
+            return
+        from pathlib import Path
+        imported = monster_imported_data(game_id, self.cfg._path)
+        img_base = (Path(self.cfg._path).parent / "games" / game_id
+                    if self.cfg._path else None)
+        if self.panel:
+            self.panel.update_imported_data(imported, img_base)
+        self.statusBar().showMessage(
+            f"Monster data imported for {self.game.name}", 4000)
+
     # ================= menu / chrome =================
     def _build_menu(self) -> None:
         tb = QToolBar("Menu")
@@ -208,6 +244,7 @@ class MainWindow(QMainWindow):
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
         self.menu.addSeparator()
         self.menu.addAction("Switch game…", self._switch_game)
+        self.menu.addAction("Import monster data…", self._open_import_wizard)
         self.menu.addSeparator()
         self.act_debug = self.menu.addAction("Show OCR debug log")
         self.act_debug.setCheckable(True)
