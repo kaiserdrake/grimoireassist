@@ -1,0 +1,23 @@
+{
+  "regions": {
+    "monster_names": [
+      {
+        "x": 205,
+        "y": 12,
+        "w": 1658,
+        "h": 133
+      }
+    ],
+    "battle_end": {
+      "x": 14,
+      "y": 14,
+      "w": 453,
+      "h": 256
+    }
+  },
+  "keywords": {
+    "battle_end": [
+      "result"
+    ]
+  }
+}

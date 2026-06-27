@@ -43,6 +43,48 @@ GRIMOIRE_URL = "https://grimoire.laeradsphere.com/"
 _GRIMOIRE_PROFILE_NAME = "grimoire_persistent"
 
 
+def _inject_clipboard_fix(page) -> None:
+    """Patch navigator.clipboard.writeText so it falls back to execCommand when
+    the Chromium clipboard IPC is blocked inside Qt WebEngine."""
+    from PyQt6.QtWebEngineCore import QWebEngineScript
+    js = """
+(function () {
+  if (window.__gaClipboardPatched) return;
+  window.__gaClipboardPatched = true;
+
+  function _execCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
+  }
+
+  var _orig = (navigator.clipboard || {}).writeText;
+  Object.defineProperty(navigator, 'clipboard', {
+    value: Object.assign({}, navigator.clipboard, {
+      writeText: function (text) {
+        var p = _orig ? _orig.call(navigator.clipboard, text) : Promise.reject();
+        return p.catch(function () { return _execCopy(text); });
+      }
+    }),
+    configurable: true, writable: false
+  });
+})();
+"""
+    script = QWebEngineScript()
+    script.setName("ga-clipboard-fix")
+    script.setSourceCode(js)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+    script.setRunsOnSubFrames(False)
+    page.scripts().insert(script)
+
+
 def _inject_rotate_fix(page) -> None:
     """Strip the 180° rotation from the grimoire drawer pull-tabs.
     QtWebEngine misrenders writing-mode + any 180° rotation (shows mirrored/upside-down).
@@ -258,6 +300,7 @@ class MonsterPanel(QWidget):
                  requires_login: bool = False, notes_url: str = "",
                  imported_data: Optional[Dict] = None,
                  image_base: Optional[Path] = None,
+                 cards_per_row: int = 4,
                  parent=None) -> None:
         super().__init__(parent)
         self.url_template = url_template
@@ -287,7 +330,7 @@ class MonsterPanel(QWidget):
         outer.addWidget(self._stack, 1)
 
         # index 0 — local cards
-        self._card_group = MonsterCardGroup()
+        self._card_group = MonsterCardGroup(cols=cards_per_row)
         self._card_group.set_image_base(image_base)
         self._card_group.open_web.connect(self._open_web_for_monster)
         self._stack.addWidget(self._card_group)
@@ -320,28 +363,42 @@ class MonsterPanel(QWidget):
 
     def _make_view(self, persistent: bool, grimoire_fix: bool) -> "QWebEngineView":
         """A web view: persistent (logged-in) profile or the default; optional grimoire
-        CSS fix; camera/mic granted so 'Insert Image from Camera' works on any site."""
+        CSS fix; camera/mic and clipboard granted so in-page actions work."""
         view = QWebEngineView()
         if persistent:
             view.setPage(QWebEnginePage(self._profile, view))
         page = view.page()
         if grimoire_fix:
             _inject_rotate_fix(page)
+        _inject_clipboard_fix(page)
+
+        # Allow JS clipboard access (navigator.clipboard API + execCommand fallback)
+        try:
+            from PyQt6.QtWebEngineCore import QWebEngineSettings
+            page.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        except Exception:
+            pass
+
         try:
             page.featurePermissionRequested.connect(
-                lambda origin, feature, p=page: self._grant_media_permission(p, origin, feature))
+                lambda origin, feature, p=page: self._grant_permission(p, origin, feature))
         except Exception:
             pass
         return view
 
-    # -- camera/mic permission -------------------------------------------
-    def _grant_media_permission(self, page, origin, feature) -> None:
+    # -- permissions -----------------------------------------------------
+    def _grant_permission(self, page, origin, feature) -> None:
         F = QWebEnginePage.Feature
-        media = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
-        if feature in media:
-            policy = QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-        else:
-            policy = QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+        # Build the set of features we grant; ClipboardReadWrite added when available
+        granted = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
+        try:
+            granted.add(F.ClipboardReadWrite)
+        except AttributeError:
+            pass  # Qt < 6.2
+        policy = (QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+                  if feature in granted
+                  else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
         page.setFeaturePermission(origin, feature, policy)
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------

@@ -8,19 +8,20 @@ from typing import List, Optional
 
 import threading
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QSizePolicy, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QPushButton, QSizePolicy, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..battle import OcrWorker
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
 from ..config import Config, GameSettings
 from ..games import (
-    GameInfo, get_game, default_game, icon_path, load_catalog,
-    monster_names, monster_imported_data, slug_map,
+    GameInfo, get_game, default_game, icon_path, import_dir, load_catalog,
+    monster_names, monster_imported_data, save_game, slug_map,
+    write_default_settings,
 )
 from ..ocr import build_engine
 from ..overlay import OverlayModel
@@ -32,10 +33,12 @@ from .monster_panel import MonsterNav, MonsterPanel, ViewModeSwitch
 
 
 class MainWindow(QMainWindow):
+    _camera_scan_done = pyqtSignal(list)
+
     def __init__(self, cfg: Config) -> None:
         super().__init__()
         self.cfg = cfg
-        self.resize(440, 600)
+        self.resize(1400, 900)
         _icon = icon_path()
         if _icon:
             self.setWindowIcon(QIcon(_icon))
@@ -53,6 +56,8 @@ class MainWindow(QMainWindow):
         self._detections: list = []         # latest [(name, confidence)]
         self._tracking_active = False       # OCR worker only runs when user starts it
 
+        self._camera_devices: list = []
+
         self._build_menu()
         self._build_statusbar()
         self._build_shortcuts()
@@ -62,8 +67,11 @@ class MainWindow(QMainWindow):
         # capture is global (one camera feeds every game)
         self._start_capture(cfg.capture.device_index)
 
+        # Scan for devices once at startup so the Camera menu is ready immediately.
+        self._populate_camera_menu()
+
         # load the selected game (panel + worker)
-        game = get_game(cfg.selected_game) or default_game()
+        game = get_game(cfg.selected_game, cfg._path) or default_game(cfg._path)
         self._start_game(game)
 
         if cfg.ui.always_on_top:
@@ -88,6 +96,7 @@ class MainWindow(QMainWindow):
         self._idle_timer.timeout.connect(self._on_idle_tick)
         # Panel is built by _start_game above, so we can start counting right away.
         self._start_idle()
+        self.showMaximized()
 
     # ================= per-game lifecycle =================
     def _start_game(self, game: Optional[GameInfo]) -> None:
@@ -96,7 +105,7 @@ class MainWindow(QMainWindow):
             return
         self.game = game
         self.cfg.selected_game = game.id
-        self.cfg.monster_name_list = monster_names(game.monsters)
+        self.cfg.monster_name_list = monster_names(game.id, self.cfg._path)
         gs = self.cfg.regions_for(game.id)
         self.cfg.ocr.regions_monster_names = gs.monster_names
         self.cfg.ocr.regions_battle_end = gs.battle_end
@@ -107,15 +116,14 @@ class MainWindow(QMainWindow):
         # (re)build panel for this game's site + slugs
         self.model = OverlayModel()
         self._detections = []
-        from pathlib import Path as _Path
         _imported = monster_imported_data(game.id, self.cfg._path)
-        _img_base = (_Path(self.cfg._path).parent / "games" / game.id
-                     if self.cfg._path else None)
+        _img_base = import_dir(game.id, self.cfg._path) if self.cfg._path else None
         self.panel = MonsterPanel(
-            game.site_url_template, slug_map=slug_map(game.monsters),
+            game.site_url_template, slug_map=slug_map(),
             url_style=game.url_style, multi_joiner=game.multi_joiner,
             requires_login=game.requires_login, notes_url=game.notes_url,
-            imported_data=_imported, image_base=_img_base)
+            imported_data=_imported, image_base=_img_base,
+            cards_per_row=game.cards_per_row)
         # Wrap panel + debug log in a single container so the debug log
         # appears below the monster panel without replacing it.
         wrapper = QWidget()
@@ -168,18 +176,26 @@ class MainWindow(QMainWindow):
             self._stop_worker()
         self._update_tracking_btn()
 
+    def _add_game(self) -> None:
+        from .add_game_dialog import AddGameDialog
+        dlg = AddGameDialog(self.cfg._path, parent=self)
+        if dlg.exec() and dlg.result_game:
+            self.statusBar().showMessage(
+                f"Game '{dlg.result_game.name}' added — use Switch game to select it.", 5000)
+
     def _switch_game(self) -> None:
-        dlg = GameSelectDialog(list(load_catalog()),
+        dlg = GameSelectDialog(list(load_catalog(self.cfg._path)),
                                current=self.cfg.selected_game, parent=self)
         if dlg.exec() and dlg.selected and dlg.selected != self.cfg.selected_game:
-            self._start_game(get_game(dlg.selected))
+            self._start_game(get_game(dlg.selected, self.cfg._path))
 
     def _open_import_wizard(self) -> None:
         if not self.game:
             return
-        from pathlib import Path
-        save_dir = (Path(self.cfg._path).parent / "games" / self.game.id
-                    if self.cfg._path else Path("games") / self.game.id)
+        save_dir = (import_dir(self.game.id, self.cfg._path)
+                    if self.cfg._path else None)
+        if save_dir is None:
+            return
         profile = getattr(self.panel, "_profile", None)
         dlg = ImportWizard(
             game_id=self.game.id,
@@ -194,12 +210,13 @@ class MainWindow(QMainWindow):
     def _on_import_done(self, game_id: str) -> None:
         if game_id != (self.game.id if self.game else None):
             return
-        from pathlib import Path
         imported = monster_imported_data(game_id, self.cfg._path)
-        img_base = (Path(self.cfg._path).parent / "games" / game_id
-                    if self.cfg._path else None)
+        img_base = import_dir(game_id, self.cfg._path) if self.cfg._path else None
         if self.panel:
             self.panel.update_imported_data(imported, img_base)
+        # Refresh OCR monster list — import data is now the source of truth
+        if self.game:
+            self.cfg.monster_name_list = monster_names(game_id, self.cfg._path)
         self.statusBar().showMessage(
             f"Monster data imported for {self.game.name}", 4000)
 
@@ -216,14 +233,19 @@ class MainWindow(QMainWindow):
         self.menu_btn.setStyleSheet("QToolButton { font-size:18px; padding:2px 10px; }")
 
         self.menu = QMenu(self)
-        self.camera_menu = self.menu.addMenu("Camera")
+
+        # ── Camera ──────────────────────────────────────────────
+        self.menu.addSection("Camera")
+        self.camera_menu = self.menu.addMenu("Select source…")
         self.menu.addAction("Retry camera", self._retry_camera)
         self.menu.addAction("Calibrate regions…\tF9", self._open_calibration)
-        self.act_gpu = self.menu.addAction("Use GPU for OCR")
+
+        # ── OCR ─────────────────────────────────────────────────
+        self.menu.addSection("OCR")
+        self.act_gpu = self.menu.addAction("Use GPU")
         self.act_gpu.setCheckable(True)
         self.act_gpu.setChecked(self.cfg.ocr.gpu)
         self.act_gpu.toggled.connect(self._toggle_gpu)
-        # minimum OCR confidence required to track a monster
         conf_menu = self.menu.addMenu("Track confidence")
         conf_group = QActionGroup(conf_menu)
         conf_group.setExclusive(True)
@@ -235,6 +257,15 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, lv=level: self._set_min_confidence(lv))
             conf_group.addAction(act)
             conf_menu.addAction(act)
+
+        # ── Game ─────────────────────────────────────────────────
+        self.menu.addSection("Game")
+        self.menu.addAction("Add game…", self._add_game)
+        self.menu.addAction("Switch game…", self._switch_game)
+        self.menu.addAction("Import monster data…", self._open_import_wizard)
+
+        # ── Window ───────────────────────────────────────────────
+        self.menu.addSection("Window")
         self.act_on_top = self.menu.addAction("Always on top")
         self.act_on_top.setCheckable(True)
         self.act_on_top.setChecked(self.cfg.ui.always_on_top)
@@ -242,15 +273,16 @@ class MainWindow(QMainWindow):
         self.act_fullscreen = self.menu.addAction("Fullscreen\tF11")
         self.act_fullscreen.setCheckable(True)
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
-        self.menu.addSeparator()
-        self.menu.addAction("Switch game…", self._switch_game)
-        self.menu.addAction("Import monster data…", self._open_import_wizard)
-        self.menu.addSeparator()
+
+        # ── Debug ────────────────────────────────────────────────
+        self.menu.addSection("Debug")
         self.act_debug = self.menu.addAction("Show OCR debug log")
         self.act_debug.setCheckable(True)
         self.act_debug.setChecked(False)
         self.act_debug.toggled.connect(self._toggle_debug)
-        self.menu.aboutToShow.connect(self._populate_camera_menu)
+
+        self.menu.aboutToShow.connect(self._show_camera_menu)
+        self._camera_scan_done.connect(self._rebuild_camera_menu)
 
         self.menu_btn.setMenu(self.menu)
 
@@ -327,35 +359,26 @@ class MainWindow(QMainWindow):
         if self.panel is not None:
             self.panel.show_monster(name)
 
+    def _show_camera_menu(self) -> None:
+        """Render the camera submenu from the cached device list (instant, no I/O)."""
+        self._rebuild_camera_menu(self._camera_devices)
+
     def _populate_camera_menu(self) -> None:
-        # DirectShow device enumeration can block for several seconds on Windows
-        # — run it on a background thread and rebuild the menu when done.
+        """Kick off a background device scan; rebuild the menu when done."""
         self.camera_menu.clear()
         self.camera_menu.addAction("Scanning devices…").setEnabled(False)
 
         def _scan():
-            # COM must be initialised on each thread that calls DirectShow.
-            try:
-                import ctypes
-                ctypes.windll.ole32.CoInitializeEx(None, 0)
-            except Exception:
-                pass
             try:
                 devices = list_named_devices()
             except Exception:
                 devices = []
-            finally:
-                try:
-                    import ctypes
-                    ctypes.windll.ole32.CoUninitialize()
-                except Exception:
-                    pass
-            # Qt widgets must only be touched from the main thread.
-            QTimer.singleShot(0, lambda: self._rebuild_camera_menu(devices))
+            self._camera_scan_done.emit(devices)
 
         threading.Thread(target=_scan, daemon=True).start()
 
     def _rebuild_camera_menu(self, devices: list) -> None:
+        self._camera_devices = devices
         self.camera_menu.clear()
         group = QActionGroup(self.camera_menu)
         group.setExclusive(True)
@@ -403,6 +426,42 @@ class MainWindow(QMainWindow):
         lay.setSpacing(4)
 
         from PyQt6.QtWidgets import QHBoxLayout
+
+        # ── Manual OCR input ────────────────────────────────────────────
+        inject_row = QWidget()
+        ilay = QHBoxLayout(inject_row)
+        ilay.setContentsMargins(0, 0, 0, 0)
+        ilay.setSpacing(6)
+        inject_lbl = QLabel("Test OCR:")
+        inject_lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
+        ilay.addWidget(inject_lbl)
+        self._ocr_input = QLineEdit()
+        self._ocr_input.setPlaceholderText("Type monster name to test matching…")
+        self._ocr_input.setStyleSheet(
+            "QLineEdit { background:#1a1a24; color:#c8ffc8; border:1px solid #2a2a36;"
+            " border-radius:3px; padding:2px 6px; font-size:11px;"
+            " font-family:Consolas,monospace; }")
+        self._ocr_input.returnPressed.connect(self._inject_ocr)
+        ilay.addWidget(self._ocr_input, 1)
+        inject_btn = QPushButton("Inject")
+        inject_btn.setFixedWidth(54)
+        inject_btn.setStyleSheet(
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }")
+        inject_btn.clicked.connect(self._inject_ocr)
+        ilay.addWidget(inject_btn)
+        clear_inject_btn = QPushButton("Clear")
+        clear_inject_btn.setFixedWidth(42)
+        clear_inject_btn.setStyleSheet(
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }")
+        clear_inject_btn.clicked.connect(self._clear_injected)
+        ilay.addWidget(clear_inject_btn)
+        lay.addWidget(inject_row)
+
+        # ── OCR log ─────────────────────────────────────────────────────
         row = QWidget()
         rlay = QHBoxLayout(row)
         rlay.setContentsMargins(0, 0, 0, 0)
@@ -433,10 +492,34 @@ class MainWindow(QMainWindow):
         self._debug_log.setStyleSheet(
             "QPlainTextEdit { background:#0d0d12; color:#c8ffc8;"
             " font-family: Consolas, monospace; font-size:11px; border:none; }")
-        self._debug_log.setFixedHeight(130)
+        self._debug_log.setFixedHeight(110)
         clear_btn.clicked.connect(self._debug_log.clear)
         lay.addWidget(self._debug_log)
         return container
+
+    def _inject_ocr(self) -> None:
+        """Feed the typed text through the OCR matching pipeline and show the result."""
+        from ..battle import match_known
+        raw = self._ocr_input.text().strip()
+        if not raw:
+            return
+        known = self.cfg.monster_name_list
+        cutoff = self.cfg.ocr.match_cutoff
+        matched = match_known(raw, known, cutoff=cutoff)
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if matched:
+            self._log_line(f"[{ts}] inject:  raw={raw!r}  →  matched={matched!r}")
+            self._on_monsters_changed([(matched, 1.0)])
+        else:
+            self._log_line(f"[{ts}] inject:  raw={raw!r}  →  no match (cutoff={cutoff})")
+            self.statusBar().showMessage(
+                f"No match for {raw!r} (cutoff {cutoff})", 3000)
+
+    def _clear_injected(self) -> None:
+        """Remove injected monsters and return to the idle state."""
+        self._ocr_input.clear()
+        self._on_monsters_changed([])
 
     def _open_log_folder(self) -> None:
         import subprocess

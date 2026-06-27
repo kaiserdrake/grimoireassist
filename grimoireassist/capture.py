@@ -43,11 +43,9 @@ def list_devices(max_index: int = 8) -> list[int]:
     """Probe device indices that open successfully."""
     found = []
     for i in range(max_index):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(i)
         if cap.isOpened():
-            ok, _ = cap.read()
-            if ok:
-                found.append(i)
+            found.append(i)
         cap.release()
     return found
 
@@ -99,7 +97,7 @@ class CaptureThread(threading.Thread):
         if self.video_file:
             cap = cv2.VideoCapture(self.video_file)
         else:
-            cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(self.device_index)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             cap.set(cv2.CAP_PROP_FPS, self.fps)

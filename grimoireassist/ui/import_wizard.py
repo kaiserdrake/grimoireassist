@@ -7,23 +7,20 @@ Grimoire exposes a direct API endpoint for raw markdown:
   GET /api/note-files/<fileId>/raw
 
 The fileId is extracted from the notes URL query string (?fileId=NN).
-The fetch is made from within the authenticated QWebEngineView so the
-session cookies are automatically included — no separate auth handling needed.
-
-The raw markdown is then parsed in Python and any images referenced as
-![alt](url) in table cells are downloaded via JS fetch with credentials.
+Markdown is fetched via urllib (unauthenticated; Grimoire's raw API is public).
+Images referenced as ![alt](url) are downloaded via urllib in a background
+thread and saved to games/<id>/import/images/.
 
 Source format expected
 ----------------------
   # Game Title          →  _game_title metadata
   ## Monster Name       →  one entry per monster
-  ### Section Name      →  subsection (optional; tables before any ### go to _root)
-  | col | col |         →  table rows; two-column = key/value, any width OK
-  ![alt](url)           →  image in a cell; downloaded to games/<id>/images/
+  ### Section Name      →  subsection with optional --- type: xxx --- front matter
+  **Key:** value        →  key-value pair (key or value may contain ![img](url))
+  | col | col |         →  legacy table rows (still supported)
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 import threading
@@ -33,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 
-from PyQt6.QtCore import QUrl, pyqtSignal
+from PyQt6.QtCore import QTimer, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit,
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
@@ -46,43 +43,40 @@ try:
 except Exception:
     _HAVE_WEBENGINE = False
 
-# JS that fetches the markdown API URL from within the authenticated page context
-_FETCH_MD_JS = """
-(async function() {{
-  try {{
-    const r = await fetch({url!r}, {{credentials: 'include'}});
-    if (!r.ok) return JSON.stringify({{error: r.status + ' ' + r.statusText}});
-    return await r.text();
-  }} catch(e) {{ return JSON.stringify({{error: String(e)}}); }}
-}})()
-"""
-
-# JS to download one image as a base64 data-URL
-_FETCH_IMG_JS = """
-(async function() {{
-  try {{
-    const r = await fetch({url!r}, {{credentials: 'include'}});
-    const b = await r.blob();
-    return await new Promise(res => {{
-      const fr = new FileReader();
-      fr.onload = () => res(fr.result);
-      fr.onerror = () => res(null);
-      fr.readAsDataURL(b);
-    }});
-  }} catch(e) {{ return null; }}
-}})()
-"""
-
 _GRIMOIRE_BASE = "https://grimoire.laeradsphere.com"
-_IMG_RE   = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-_ICON_RE  = re.compile(r':icon\[([^\]]+)\]')   # :icon[elem_fire] → "Elem Fire"
-_HTML_TAG = re.compile(r'<[^>]+>')             # strip residual HTML tags
+_IMG_RE    = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+_ICON_RE   = re.compile(r':icon\[([^\]]+)\]')   # :icon[elem_fire] → "Elem Fire"
+_HTML_TAG  = re.compile(r'<[^>]+>')             # strip residual HTML tags
+_BOLD_KV_RE = re.compile(r'^\*\*(.+?)\*\*\s*(.*)', re.DOTALL)
 
 
 def _clean_cell(text: str) -> str:
-    """Normalise a table cell: resolve Grimoire shortcodes and strip HTML."""
+    """Normalise a table cell: resolve Grimoire shortcodes and strip all HTML."""
     text = _ICON_RE.sub(lambda m: m.group(1).replace("_", " ").title(), text)
-    text = _HTML_TAG.sub(" ", text)
+    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
+    text = _HTML_TAG.sub("", text)
+    text = re.sub(r'[ \t]+', ' ', text).strip(" ,")
+    return text
+
+
+def _clean_value_html(text: str) -> str:
+    """Normalise a value cell, preserving <span color> for rich-text rendering.
+
+    Strips everything except span tags that carry a color style — these are
+    used for weakness ratings (red = worse, lightblue/green = better).
+    """
+    text = _ICON_RE.sub(lambda m: m.group(1).replace("_", " ").title(), text)
+    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
+
+    def _keep_color(m: re.Match) -> str:
+        style = m.group(1)
+        cm = re.search(r'color\s*:\s*([^;",]+)', style)
+        return f'<span style="color:{cm.group(1).strip()}">' if cm else ''
+
+    text = re.sub(r'<span\b[^>]*style="([^"]*)"[^>]*>', _keep_color,
+                  text, flags=re.IGNORECASE)
+    # Remove all HTML except the span tags we just simplified
+    text = re.sub(r'<(?!/?span\b)[^>]+>', '', text)
     text = re.sub(r'[ \t]+', ' ', text).strip(" ,")
     return text
 
@@ -104,32 +98,125 @@ def _api_url_from_notes_url(notes_url: str) -> Optional[str]:
     return None
 
 
+def _sec_append(result: Dict, monster: str, section: str,
+                sec_type: Optional[str], row: list) -> None:
+    """Append a row to a monster section, creating it with type metadata if needed."""
+    existing = result[monster].get(section)
+    if existing is None:
+        if sec_type:
+            result[monster][section] = {"_type": sec_type, "rows": [row]}
+        else:
+            result[monster][section] = [row]
+    elif isinstance(existing, dict):
+        existing["rows"].append(row)
+    else:
+        existing.append(row)
+
+
 def _parse_markdown(md: str) -> Dict[str, Any]:
-    """Parse Grimoire-style markdown into the data.json structure."""
+    """Parse Grimoire-style markdown into the data.json structure.
+
+    Sections may carry a front-matter type hint (between --- delimiters):
+      type: key-value-pair   →  **Key:** value lines rendered as key : value
+      type: table-col-row    →  keys become column headers, values become a single row
+      type: table-row-col    →  first **…** line is column headers, rest are data rows
+    Legacy | table | rows are still supported for older data.
+    """
     result: Dict[str, Any] = {}
     current_monster: Optional[str] = None
     current_section = "_root"
+    current_section_type: Optional[str] = None
+    in_front_matter = False
+    front_matter_buf: List[str] = []
 
     for line in md.splitlines():
         s = line.strip()
+
+        # Front-matter block delimiters (---)
+        if s == "---":
+            if not in_front_matter:
+                in_front_matter = True
+                front_matter_buf = []
+            else:
+                in_front_matter = False
+                for fm in front_matter_buf:
+                    if fm.startswith("type:"):
+                        current_section_type = fm[5:].strip()
+                        # Pre-create section entry so _type is stored even before rows
+                        if current_monster is not None:
+                            result[current_monster].setdefault(
+                                current_section,
+                                {"_type": current_section_type, "rows": []})
+            continue
+
+        if in_front_matter:
+            front_matter_buf.append(s)
+            continue
+
         if s.startswith("#### "):
             if current_monster:
                 current_section = s[5:].strip()
+                current_section_type = None
         elif s.startswith("### "):
             if current_monster:
                 current_section = s[4:].strip()
+                current_section_type = None
         elif s.startswith("## "):
             current_monster = s[3:].strip()
             current_section = "_root"
+            current_section_type = None
             if current_monster:
                 result[current_monster] = {}
+        elif s.startswith("Image:") and current_monster is not None:
+            url = s[6:].strip()
+            if url:
+                result[current_monster]["_image_url"] = url
         elif s.startswith("# "):
             result["_game_title"] = s[2:].strip()
             current_monster = None
             current_section = "_root"
+            current_section_type = None
+        elif s.startswith("**") and current_monster is not None:
+            # Key-value line: **Key:** value  or  **![icon](url):** value
+            m = _BOLD_KV_RE.match(s)
+            if not m:
+                continue
+            key_raw = m.group(1).rstrip(":")
+            val_raw = m.group(2).strip()
+            key_imgs = _IMG_RE.findall(key_raw)
+            key_text = _clean_cell(_IMG_RE.sub("", key_raw))
+
+            # Split <br>-separated values into sub_items
+            br_parts = re.split(r'<br\s*/?>', val_raw, flags=re.IGNORECASE)
+            if len(br_parts) > 1:
+                sub_items = []
+                for part in br_parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    p_imgs = _IMG_RE.findall(part)
+                    p_text = _clean_value_html(_IMG_RE.sub("", part))
+                    sub_items.append({
+                        "text": p_text,
+                        "imgs": [u for _, u in p_imgs],
+                        "img_paths": [],
+                    })
+                val_cell = {"text": "", "imgs": [], "img_paths": [],
+                            "sub_items": sub_items}
+            else:
+                val_imgs = _IMG_RE.findall(val_raw)
+                val_text = _clean_value_html(_IMG_RE.sub("", val_raw))
+                val_cell = {"text": val_text,
+                            "imgs": [u for _, u in val_imgs], "img_paths": []}
+
+            row = [
+                {"text": key_text, "imgs": [u for _, u in key_imgs], "img_paths": []},
+                val_cell,
+            ]
+            _sec_append(result, current_monster, current_section,
+                        current_section_type, row)
         elif s.startswith("|") and current_monster is not None:
             cells = [c.strip() for c in s.strip("|").split("|")]
-            # Skip separator rows  |---|---|
             if all(re.fullmatch(r"[-: ]+", c) for c in cells if c):
                 continue
             row = []
@@ -139,7 +226,7 @@ def _parse_markdown(md: str) -> Dict[str, Any]:
                 row.append({"text": text,
                              "imgs": [url for _alt, url in imgs],
                              "img_paths": []})
-            result[current_monster].setdefault(current_section, []).append(row)
+            _sec_append(result, current_monster, current_section, None, row)
 
     return result
 
@@ -189,27 +276,26 @@ class ImportWizard(QDialog):
         lay.setContentsMargins(16, 16, 16, 16)
 
         lay.addWidget(QLabel(
-            "Fetches raw markdown from the Grimoire API and saves it locally.\n"
+            "Fetches monster data from the Grimoire API and saves it locally.\n"
             "You must be logged into Grimoire (open the notes view first)."))
-
-        # API URL field — auto-filled from notes_url, editable as fallback
-        url_row = QWidget()
-        rl = QHBoxLayout(url_row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(8)
-        rl.addWidget(QLabel("API URL:"))
-        self._url_edit = QLineEdit(self._api_url or "")
-        self._url_edit.setPlaceholderText(
-            f"{_GRIMOIRE_BASE}/api/note-files/<fileId>/raw")
-        rl.addWidget(self._url_edit, 1)
-        lay.addWidget(url_row)
 
         self._go_btn = QPushButton("Import")
         self._go_btn.clicked.connect(self._start_import)
         lay.addWidget(self._go_btn)
 
-        self._status = QLabel("Ready" if self._api_url
-                               else "Could not extract fileId from notes URL — enter the API URL manually")
+        # Manual URL entry — only shown when auto-derivation fails
+        self._url_row = QWidget()
+        rl = QHBoxLayout(self._url_row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(8)
+        rl.addWidget(QLabel("API URL:"))
+        self._url_edit = QLineEdit()
+        self._url_edit.setPlaceholderText(
+            f"{_GRIMOIRE_BASE}/api/note-files/<fileId>/raw")
+        rl.addWidget(self._url_edit, 1)
+        lay.addWidget(self._url_row)
+
+        self._status = QLabel("Ready")
         self._status.setStyleSheet("color:#9a9aa3; font-size:12px;")
         self._status.setWordWrap(True)
         lay.addWidget(self._status)
@@ -247,9 +333,9 @@ class ImportWizard(QDialog):
     # ------------------------------------------------------------------ import
 
     def _start_import(self) -> None:
-        api_url = self._url_edit.text().strip()
+        api_url = self._url_edit.text().strip() or self._api_url
         if not api_url:
-            self._status.setText("Please enter the API URL")
+            self._status.setText("Please enter the API URL.")
             return
         self._go_btn.setEnabled(False)
         self._status.setText(f"Fetching markdown from {api_url} …")
@@ -305,48 +391,92 @@ class ImportWizard(QDialog):
     # ------------------------------------------------------------------ images
 
     def _collect_images(self) -> None:
+        """Walk all cells, assign each unique icon URL a shared path under
+        images/icons/ and queue it for download exactly once.
+        Also queue monster portrait images stored under _image_url."""
+        url_to_rel: dict = {}   # url -> rel_path  (dedup across all monsters)
         for monster, sections in self._raw.items():
             if monster.startswith("_") or not isinstance(sections, dict):
                 continue
-            slug = _safe_name(monster)
-            for sec_key, rows in sections.items():
-                sec_name = _safe_name(sec_key)
-                if not isinstance(rows, list):
+            # Monster portrait image
+            portrait_url = sections.get("_image_url", "")
+            if portrait_url and portrait_url.startswith("http"):
+                slug = _safe_name(monster)
+                rel = f"images/monsters/{slug}.png"
+                self._image_queue.append((rel, portrait_url))
+                sections["_image_path"] = rel
+            for sec_val in sections.values():
+                if isinstance(sec_val, dict):
+                    rows = sec_val.get("rows", [])
+                elif isinstance(sec_val, list):
+                    rows = sec_val
+                else:
                     continue
-                for row_i, row in enumerate(rows):
-                    for col_i, cell in enumerate(row):
+                for row in rows:
+                    for cell in row:
                         if not isinstance(cell, dict):
                             continue
-                        paths = []
-                        for img_i, url in enumerate(cell.get("imgs", [])):
-                            if not url or not url.startswith("http"):
-                                continue
-                            rel = (f"images/{slug}/"
-                                   f"{sec_name}_{row_i}_{col_i}_{img_i}.png")
-                            self._image_queue.append((rel, url))
-                            paths.append(rel)
-                        cell["img_paths"] = paths
+                        cell["img_paths"] = self._queue_imgs(
+                            cell.get("imgs", []), url_to_rel)
+                        for sub in cell.get("sub_items", []):
+                            sub["img_paths"] = self._queue_imgs(
+                                sub.get("imgs", []), url_to_rel)
+
+    def _queue_imgs(self, urls: list, url_to_rel: dict) -> list:
+        """Map a list of image URLs to shared rel-paths, queuing new ones."""
+        paths = []
+        for url in urls:
+            if not url or not url.startswith("http"):
+                continue
+            if url not in url_to_rel:
+                fname = url.rsplit("/", 1)[-1].split("?")[0] or "icon.png"
+                rel = f"images/icons/{fname}"
+                url_to_rel[url] = rel
+                self._image_queue.append((rel, url))
+            paths.append(url_to_rel[url])
+        return paths
 
     def _download_next_image(self) -> None:
         self._progress.setValue(self._total_images - len(self._image_queue))
         if not self._image_queue:
             self._finish()
             return
-        rel_path, url = self._image_queue[0]
-        self._web.page().runJavaScript(
-            _FETCH_IMG_JS.format(url=url),
-            lambda data: self._on_image_data(rel_path, data))
+        rel_path, url = self._image_queue.pop(0)
+        dest = self.save_dir / rel_path
 
-    def _on_image_data(self, rel_path: str, data_url: Optional[str]) -> None:
-        self._image_queue.pop(0)
-        if data_url and "," in data_url:
+        # Skip if already cached on disk
+        if dest.exists():
+            QTimer.singleShot(0, self._download_next_image)
+            return
+
+        save_dir = self.save_dir
+
+        def _fetch():
             try:
-                dest = self.save_dir / rel_path
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "Mozilla/5.0 GrimoireAssist/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    data = r.read()
+                dest = save_dir / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(base64.b64decode(data_url.split(",", 1)[1]))
+                if rel_path.endswith(".png"):
+                    # Convert any format (including AVIF) to PNG via Pillow
+                    try:
+                        import io
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(data)).convert("RGBA")
+                        buf = io.BytesIO()
+                        img.save(buf, "PNG")
+                        dest.write_bytes(buf.getvalue())
+                    except Exception:
+                        dest.write_bytes(data)
+                else:
+                    dest.write_bytes(data)
             except Exception:
                 pass
-        self._download_next_image()
+            QTimer.singleShot(0, self._download_next_image)
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     # ------------------------------------------------------------------ save
 

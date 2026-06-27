@@ -79,6 +79,48 @@ class UiConfig:
     always_on_top: bool = False
 
 
+def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
+    """Read a games/<id>/settings.json file into a GameSettings object."""
+    try:
+        import json as _json
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+        regions = raw.get("regions", {})
+        keywords = raw.get("keywords", {})
+        mons = regions.get("monster_names") or [{}]
+        end_kw = [str(k) for k in (keywords.get("battle_end") or [])]
+        raw_p = raw.get("monster_persist_s")
+        raw_pe = raw.get("monster_persist_end_s")
+        return GameSettings(
+            monster_names=[_region(r) for r in mons],
+            battle_end=_region(regions.get("battle_end")),
+            end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
+            monster_persist_s=float(raw_p) if raw_p is not None else None,
+            monster_persist_end_s=float(raw_pe) if raw_pe is not None else None,
+        )
+    except Exception:
+        return None
+
+
+def _save_game_settings(path: "Path", gs: "GameSettings") -> None:
+    """Write a GameSettings object to games/<id>/settings.json."""
+    import json as _json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {
+        "regions": {
+            "monster_names": [asdict(r) for r in gs.monster_names],
+            "battle_end": asdict(gs.battle_end),
+        },
+        "keywords": {
+            "battle_end": gs.end_keywords,
+        },
+    }
+    if gs.monster_persist_s is not None:
+        data["monster_persist_s"] = gs.monster_persist_s
+    if gs.monster_persist_end_s is not None:
+        data["monster_persist_end_s"] = gs.monster_persist_end_s
+    path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _region(d: dict | None) -> Region:
     d = d or {}
     return Region(int(d.get("x", 0)), int(d.get("y", 0)),
@@ -102,6 +144,11 @@ class Config:
 
     def set_regions_for(self, game_id: str, settings: GameSettings) -> None:
         self.games[game_id] = settings
+        # Persist immediately to games/<id>/settings.json
+        if self._path:
+            _save_game_settings(
+                Path(self._path).parent / "games" / game_id / "settings.json",
+                settings)
 
     def effective_monster_persist_s(self) -> float:
         gs = self.games.get(self.selected_game or "")
@@ -126,6 +173,26 @@ class Config:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         cfg = cls.from_dict(raw)
         cfg._path = path
+        cls._migrate_single_game(cfg, raw)   # needs _path to find the catalog
+        # Migrate any game settings still in config.yaml → settings.json
+        for gid, gs in list(cfg.games.items()):
+            sj = path.parent / "games" / gid / "settings.json"
+            if not sj.exists():
+                _save_game_settings(sj, gs)
+
+        # Load (or reload) per-game settings from games/<id>/settings.json.
+        # settings.json is authoritative; config.yaml entries are only a fallback
+        # for installations that haven't migrated yet.
+        games_dir = path.parent / "games"
+        if games_dir.is_dir():
+            for game_dir in games_dir.iterdir():
+                if not game_dir.is_dir():
+                    continue
+                sj = game_dir / "settings.json"
+                if sj.exists():
+                    gs = _load_game_settings(sj)
+                    if gs is not None:
+                        cfg.games[game_dir.name] = gs
         return cfg
 
     @classmethod
@@ -179,7 +246,6 @@ class Config:
             selected_game=selected_game,
             games=games,
         )
-        cls._migrate_single_game(cfg, raw)
         return cfg
 
     @staticmethod
@@ -199,13 +265,14 @@ class Config:
             m = re.search(r"/(\d+)/monsters", u or "")
             return m.group(1) if m else ""
 
+        catalog = load_catalog(cfg._path)
         gid = None
-        for g in load_catalog():
+        for g in catalog:
             if num(g.site_url_template) and num(g.site_url_template) == num(site_url):
                 gid = g.id
                 break
-        if gid is None and load_catalog():
-            gid = load_catalog()[0].id
+        if gid is None and catalog:
+            gid = catalog[0].id
         if gid:
             cfg.games[gid] = GameSettings(monster_names=[_region(r) for r in old_regions])
             if not cfg.selected_game:
@@ -236,18 +303,7 @@ class Config:
                 "match_cutoff": self.ocr.match_cutoff,
             },
             "ui": {"always_on_top": self.ui.always_on_top},
-            "games": {
-                gid: {
-                    "regions": {
-                        "monster_names": [asdict(r) for r in gs.monster_names],
-                        "battle_end": asdict(gs.battle_end),
-                    },
-                    "keywords": {"battle_end": gs.end_keywords},
-                    **({"monster_persist_s": gs.monster_persist_s} if gs.monster_persist_s is not None else {}),
-                    **({"monster_persist_end_s": gs.monster_persist_end_s} if gs.monster_persist_end_s is not None else {}),
-                }
-                for gid, gs in self.games.items()
-            },
+            # Per-game settings are stored in games/<id>/settings.json, not here.
         }
 
     def save(self, path: str | Path | None = None) -> None:
@@ -257,3 +313,6 @@ class Config:
             encoding="utf-8",
         )
         self._path = target
+        # Flush any in-memory game settings to their settings.json files
+        for gid, gs in self.games.items():
+            _save_game_settings(target.parent / "games" / gid / "settings.json", gs)
