@@ -15,12 +15,15 @@ import re
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ..ocr import conf_level
+from .monster_card import MonsterCardGroup
 
 # button colours per OCR confidence level
 _LEVEL_STYLE = {
@@ -38,6 +41,48 @@ except Exception:  # pragma: no cover - WebEngine missing
 
 GRIMOIRE_URL = "https://grimoire.laeradsphere.com/"
 _GRIMOIRE_PROFILE_NAME = "grimoire_persistent"
+
+
+def _inject_clipboard_fix(page) -> None:
+    """Patch navigator.clipboard.writeText so it falls back to execCommand when
+    the Chromium clipboard IPC is blocked inside Qt WebEngine."""
+    from PyQt6.QtWebEngineCore import QWebEngineScript
+    js = """
+(function () {
+  if (window.__gaClipboardPatched) return;
+  window.__gaClipboardPatched = true;
+
+  function _execCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
+  }
+
+  var _orig = (navigator.clipboard || {}).writeText;
+  Object.defineProperty(navigator, 'clipboard', {
+    value: Object.assign({}, navigator.clipboard, {
+      writeText: function (text) {
+        var p = _orig ? _orig.call(navigator.clipboard, text) : Promise.reject();
+        return p.catch(function () { return _execCopy(text); });
+      }
+    }),
+    configurable: true, writable: false
+  });
+})();
+"""
+    script = QWebEngineScript()
+    script.setName("ga-clipboard-fix")
+    script.setSourceCode(js)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+    script.setRunsOnSubFrames(False)
+    page.scripts().insert(script)
 
 
 def _inject_rotate_fix(page) -> None:
@@ -252,14 +297,19 @@ class MonsterPanel(QWidget):
 
     def __init__(self, url_template: str, slug_map: Optional[Dict[str, str]] = None,
                  url_style: str = "path", multi_joiner: str = " || ",
-                 requires_login: bool = False, notes_url: str = "", parent=None) -> None:
+                 requires_login: bool = False, notes_url: str = "",
+                 imported_data: Optional[Dict] = None,
+                 image_base: Optional[Path] = None,
+                 cards_per_row: int = 4,
+                 parent=None) -> None:
         super().__init__(parent)
         self.url_template = url_template
         self.slug_map = slug_map or {}
         self.url_style = url_style
         self.multi_joiner = multi_joiner
         self.current: Optional[str] = None
-        self._loaded_url: Optional[str] = None   # to avoid reloading the same URL
+        self._loaded_url: Optional[str] = None
+        self._imported: Dict = imported_data or {}
 
         self.setStyleSheet("QWidget { background:#15151b; color:#e8e8ec; }")
         outer = QVBoxLayout(self)
@@ -272,32 +322,40 @@ class MonsterPanel(QWidget):
         self._countdown_label.setVisible(False)
         outer.addWidget(self._countdown_label)
 
-        # stacked web area: index 0 = monster info view, index 1 = notes view
+        # Stack layout:
+        #   index 0 — MonsterCardGroup (local data, instant; always present)
+        #   index 1 — Grimoire notes view (🔮 toggle; unchanged)
+        #   index 2 — On-demand web view (Full page / fallback when no import)
         self._stack = QStackedWidget()
         outer.addWidget(self._stack, 1)
 
+        # index 0 — local cards
+        self._card_group = MonsterCardGroup(cols=cards_per_row)
+        self._card_group.set_image_base(image_base)
+        self._card_group.open_web.connect(self._open_web_for_monster)
+        self._stack.addWidget(self._card_group)
+
         if _HAVE_WEBENGINE:
-            # persistent profile keeps logins/cookies between sessions (for login sites)
             self._profile = QWebEngineProfile(_GRIMOIRE_PROFILE_NAME)
             self._profile.setPersistentCookiesPolicy(
                 QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies
             )
-            # index 0 — monster info view
-            self.web = self._make_view(persistent=requires_login,
-                                       grimoire_fix=is_grimoire(url_template))
-            self.web.setHtml(_BLANK_HTML)
-            self._stack.addWidget(self.web)
-
-            # index 1 — secondary notes view (the 🔮 toggle); always logged in
+            # index 1 — Grimoire notes (unchanged)
             notes = notes_url or GRIMOIRE_URL
             self._grimoire_web = self._make_view(persistent=True,
                                                  grimoire_fix=is_grimoire(notes))
             self._grimoire_web.setUrl(QUrl(notes))
             self._stack.addWidget(self._grimoire_web)
+
+            # index 2 — on-demand monster info web view
+            self.web = self._make_view(persistent=requires_login,
+                                       grimoire_fix=is_grimoire(url_template))
+            self.web.setHtml(_BLANK_HTML)
+            self._stack.addWidget(self.web)
         else:
-            self.web = None
             self._grimoire_web = None
             self._profile = None
+            self.web = None
             fallback = QLabel("PyQt6-WebEngine not installed — cannot embed page.")
             fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
             fallback.setStyleSheet("color:#c66;")
@@ -305,36 +363,52 @@ class MonsterPanel(QWidget):
 
     def _make_view(self, persistent: bool, grimoire_fix: bool) -> "QWebEngineView":
         """A web view: persistent (logged-in) profile or the default; optional grimoire
-        CSS fix; camera/mic granted so 'Insert Image from Camera' works on any site."""
+        CSS fix; camera/mic and clipboard granted so in-page actions work."""
         view = QWebEngineView()
         if persistent:
             view.setPage(QWebEnginePage(self._profile, view))
         page = view.page()
         if grimoire_fix:
             _inject_rotate_fix(page)
+        _inject_clipboard_fix(page)
+
+        # Allow JS clipboard access (navigator.clipboard API + execCommand fallback)
+        try:
+            from PyQt6.QtWebEngineCore import QWebEngineSettings
+            page.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        except Exception:
+            pass
+
         try:
             page.featurePermissionRequested.connect(
-                lambda origin, feature, p=page: self._grant_media_permission(p, origin, feature))
+                lambda origin, feature, p=page: self._grant_permission(p, origin, feature))
         except Exception:
             pass
         return view
 
-    # -- camera/mic permission -------------------------------------------
-    def _grant_media_permission(self, page, origin, feature) -> None:
+    # -- permissions -----------------------------------------------------
+    def _grant_permission(self, page, origin, feature) -> None:
         F = QWebEnginePage.Feature
-        media = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
-        if feature in media:
-            policy = QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-        else:
-            policy = QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+        # Build the set of features we grant; ClipboardReadWrite added when available
+        granted = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
+        try:
+            granted.add(F.ClipboardReadWrite)
+        except AttributeError:
+            pass  # Qt < 6.2
+        policy = (QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+                  if feature in granted
+                  else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
         page.setFeaturePermission(origin, feature, policy)
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------
     def set_grimoire_visible(self, visible: bool) -> None:
-        self._stack.setCurrentIndex(1 if visible else 0)
+        if visible:
+            self._stack.setCurrentIndex(1)   # grimoire notes
+        else:
+            self._stack.setCurrentIndex(0)   # local cards (or fallback)
 
     def set_countdown(self, seconds: Optional[int]) -> None:
-        """Show a countdown label. Pass None to hide it."""
         if seconds is None:
             self._countdown_label.setVisible(False)
         else:
@@ -343,26 +417,47 @@ class MonsterPanel(QWidget):
             self._countdown_label.setVisible(True)
 
     def open_grimoire_url(self, url: str) -> None:
-        """Navigate the grimoire view to a URL and bring it to front (for OCR results)."""
         if self._grimoire_web is not None:
             self._grimoire_web.setUrl(QUrl(url))
         self.set_grimoire_visible(True)
 
-    # -- monster page ----------------------------------------------------
+    # -- local card display ----------------------------------------------
     def show_monsters(self, names: List[str]) -> None:
-        """Show all detected monsters (combined for 'search'; the first for 'path')."""
+        """Show detected monsters. Uses local cards if imported data exists,
+        otherwise falls back to the web view."""
         self.current = names[0] if names else None
-        if self.web is None:
-            return
-        url = build_monster_url(self.url_template, names, self.url_style, self.slug_map,
-                                self.multi_joiner)
-        # Skip if the resulting page is unchanged — a different detection order, or a
-        # confidence-level change, must NOT reload the page.
-        if url == self._loaded_url:
-            return
-        self._loaded_url = url
-        self.web.setUrl(QUrl(url)) if url else self.web.setHtml(_BLANK_HTML)
+
+        # Always update the card group (shows placeholder card if no import)
+        self._card_group.show_monsters(names, self._imported)
+
+        # If no imported data at all, fall back to web view at index 2
+        if not self._imported and names and self.web is not None:
+            url = build_monster_url(self.url_template, names, self.url_style,
+                                    self.slug_map, self.multi_joiner)
+            if url != self._loaded_url:
+                self._loaded_url = url
+                self.web.setUrl(QUrl(url)) if url else self.web.setHtml(_BLANK_HTML)
+            self._stack.setCurrentIndex(2)
+        else:
+            self._stack.setCurrentIndex(0)
 
     def show_monster(self, name: str) -> None:
-        """Focus a single monster (e.g. a button click)."""
         self.show_monsters([name] if name else [])
+
+    def _open_web_for_monster(self, name: str) -> None:
+        """Open the web view for a single monster (called by 'Full page' button)."""
+        if self.web is None:
+            return
+        url = build_monster_url(self.url_template, [name], self.url_style,
+                                self.slug_map, self.multi_joiner)
+        if url:
+            self.web.setUrl(QUrl(url))
+            self._loaded_url = url
+        else:
+            self.web.setHtml(_BLANK_HTML)
+        self._stack.setCurrentIndex(2)
+
+    def update_imported_data(self, data: dict, image_base: Optional[Path] = None) -> None:
+        """Refresh local data after a re-import without rebuilding the panel."""
+        self._imported = data
+        self._card_group.set_image_base(image_base)

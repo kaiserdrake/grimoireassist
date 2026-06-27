@@ -27,10 +27,18 @@ def test_config_roundtrip(tmp_path):
 
 def test_config_migrates_single_game(tmp_path):
     """An old-style config (ocr.regions + site) is carried into the games map."""
+    import json
+    # Provide a catalog so the migration can resolve the game id
+    gd = tmp_path / "games"
+    gd.mkdir()
+    (gd / "games.json").write_text(json.dumps([
+        {"id": "mhs3", "name": "MH Stories 3",
+         "site_url_template": "https://example.com/3/monsters/{name}"},
+    ]), encoding="utf-8")
     p = tmp_path / "config.yaml"
     p.write_text(
         "ocr:\n  regions:\n    monster_names:\n    - {x: 5, y: 6, w: 70, h: 8}\n"
-        "site:\n  url_template: https://monsterbuddy.app/3/monsters/{name}\n",
+        "site:\n  url_template: https://example.com/3/monsters/{name}\n",
         encoding="utf-8",
     )
     cfg = Config.load(p)

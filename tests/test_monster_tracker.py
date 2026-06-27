@@ -94,8 +94,7 @@ def test_match_known_filters_non_monsters():
 
 def test_match_known_rejects_ui_text():
     """Pin-menu UI text must not be matched to monsters (real bug report)."""
-    from grimoireassist.games import monster_names
-    names = monster_names("monsters_3")
+    names = ["Rey Dau", "Espinas", "Ajarakan", "Rathalos", "Nargacuga", "Arkveld", "Magnamalo", "Lunagaron", "Malzeno", "Velkhana"]
     for ui in ("Set Yellow Pin", "Set Red Pin", "Set Blue Pin", "Set Green Pin",
                "Red", "Set Pin", "Yellow"):
         assert match_known(ui, names) is None, f"{ui!r} wrongly matched"

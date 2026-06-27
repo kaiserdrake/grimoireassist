@@ -3,15 +3,20 @@
     "id": "mhs3",
     "name": "MH Stories 3: Twisted Reflection",
     "site_url_template": "https://grimoire.laeradsphere.com/game/236/258/notes?fileId=14&st1={name}",
-    "monsters": "monsters_3",
     "url_style": "search",
+    "multi_joiner": " || ",
     "requires_login": true,
-    "notes_url": "https://grimoire.laeradsphere.com/game/236/258/notes?fileId=14"
+    "notes_url": "https://grimoire.laeradsphere.com",
+    "cards_per_row": 3
   },
   {
     "id": "mhs2",
     "name": "MH Stories 2: Wings of Ruin",
     "site_url_template": "https://monsterbuddy.app/2/monsters/{name}",
-    "monsters": "monsters_2"
+    "url_style": "path",
+    "multi_joiner": " || ",
+    "requires_login": false,
+    "notes_url": "",
+    "cards_per_row": 4
   }
 ]

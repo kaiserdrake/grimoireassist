@@ -184,8 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     _apply_dark_theme(app)
 
     # Show the game-select page when no valid game is selected yet.
-    if get_game(cfg.selected_game) is None:
-        dlg = GameSelectDialog(list(load_catalog()), current=cfg.selected_game)
+    if get_game(cfg.selected_game, cfg._path) is None:
+        dlg = GameSelectDialog(list(load_catalog(cfg._path)), current=cfg.selected_game)
         if not dlg.exec() or not dlg.selected:
             return 0  # user closed without choosing
         cfg.selected_game = dlg.selected
