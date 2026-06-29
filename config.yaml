@@ -21,4 +21,4 @@ ocr:
 ui:
   always_on_top: false
 logging:
-  to_file: true
+  to_file: false

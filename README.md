@@ -81,6 +81,11 @@ python -m grimoireassist --video samples\clip.mp4     REM test against a recorde
      **Battle-End text** field. When that text shows, monster retention drops so the list clears
      promptly after a fight.
    Click **Save** — regions are stored per game and applied live (no restart).
+4. **Import monster data** via **☰ → Import monster data…** — this populates the monster list used
+   for fuzzy matching (without it there's nothing to match detections against) and the in-app
+   monster cards. See [Importing monster data](#importing-monster-data).
+
+The window opens at ~60% of your screen (centred), not maximized.
 
 ## The navbar
 
@@ -92,20 +97,29 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   orange = mid, yellow = low (hover shows the %). Confidence is **sticky at the best level reached**
   until the monster clears, so it never flickers down. Click a pill to focus that monster's page.
 - **View switch** — `Auto Switch` (default) vs `Grimoire`:
-  - **Auto Switch** — shows the detected monsters while in a fight; after ~16s with nothing
-    detected it switches to your full Grimoire notes.
+  - **Auto Switch** — shows the detected monsters while in a fight; 1 minute after the last
+    monster disappears it switches to your full Grimoire notes. The app opens on this view.
   - **Grimoire** — locks to the notes view; no auto-switching.
 
 ## The ☰ menu
 
-- **Camera ▸** — pick the capture device (live device list).
-- **Retry camera** — re-open the current device (e.g. after another app released it).
-- **Calibrate regions… (F9)** — see above.
-- **Use GPU for OCR** — toggle GPU/CPU OCR live (model reloads on the first read after switching).
-- **Track confidence ▸** — minimum confidence required to track a monster: *Low and up (all)*,
-  *Mid and up*, or *High only*. Lower-confidence detections are filtered out.
-- **Always on top** / **Fullscreen (F11)**.
-- **Switch game…** — reopen the game picker.
+- **Camera**
+  - **Select source… ▸** — pick the capture device (live device list).
+  - **Retry camera** — re-open the current device (e.g. after another app released it).
+  - **Calibrate regions… (F9)** — see above.
+- **OCR**
+  - **Use GPU** — toggle GPU/CPU OCR live (model reloads on the first read after switching).
+  - **Track confidence ▸** — minimum confidence required to track a monster: *Low and up (all)*,
+    *Mid and up*, or *High only*. Lower-confidence detections are filtered out.
+- **Game**
+  - **Add game…** — add a new game to the catalog (id, name, info-URL template, options).
+  - **Switch game…** — reopen the game picker.
+  - **Import monster data…** — fetch the monster list + info from your Grimoire notes (see below).
+- **Window** — **Always on top** / **Fullscreen (F11)**.
+- **Debug**
+  - **Show OCR debug log** — show the in-app panel of raw/matched OCR text plus a manual
+    *Test OCR* box for trying name matches.
+  - **Log to file** — also write that debug log to `logs/ocr_<timestamp>.log`. **Off by default.**
 
 ## Detection behaviour
 
@@ -123,27 +137,44 @@ the display flicker:
 
 ## Monster info sources (per game)
 
-Each game in `grimoireassist/data/games.json` defines where monster info comes from:
+The game catalog lives at `games/games.json` (next to `config.yaml`, user-editable). Each entry
+defines where monster info comes from:
 
 | Field | Meaning | Default |
 |-------|---------|---------|
+| `id` | short game id (used for the `games/<id>/` folder) | — |
+| `name` | display name in the picker | — |
 | `site_url_template` | info URL; `{name}` is substituted | — |
 | `url_style` | `"path"` (slug in path, one monster) or `"search"` (query term, multi-monster) | `"path"` |
 | `multi_joiner` | separator for multiple monsters (search style) | `" \|\| "` |
 | `requires_login` | monster view uses the persistent logged-in profile | `false` |
 | `notes_url` | the secondary view shown in `Grimoire` mode (blank → grimoire) | `""` |
-| `monsters` | bundled monster list file id (`monsters_<id>.json`) | — |
+| `cards_per_row` | monster cards shown per row in the panel | `4` |
 
 Built-in games:
 
 - **MH Stories 3** → your Grimoire notes (`url_style: search`, `requires_login: true`). Multiple
-  detected monsters are shown at once via `?st1=monA || monB` (sorted, so detection order doesn't
+  detected monsters are shown at once via `&st1=monA || monB` (sorted, so detection order doesn't
   reload the page). The slug is the lowercase monster name.
 - **MH Stories 2** → monsterbuddy.app (`url_style: path`, single monster).
 
-**Adding a game:** add a catalog entry plus a `monsters_<id>.json` list (used for fuzzy matching).
-A standard wiki (path style, no login) is plug-and-play; a login-gated, multi-monster site can set
-`requires_login`, `multi_joiner`, and `notes_url`.
+**Adding a game:** use **☰ → Add game…** (writes the catalog entry and a default
+`games/<id>/settings.json`), then **calibrate regions** and **import monster data**. A standard wiki
+(path style, no login) is plug-and-play; a login-gated, multi-monster site can set `requires_login`,
+`multi_joiner`, and `notes_url`.
+
+## Importing monster data
+
+The **monster list used for fuzzy matching comes from imported data** — until you import, there is
+nothing to match against. **☰ → Import monster data…** fetches your monster notes straight from
+Grimoire's raw-markdown API and saves them locally to `games/<id>/import/` (`data.json` + downloaded
+`images/`), which also feeds the in-app monster cards.
+
+- The API URL is auto-derived from the game's `notes_url` (`?fileId=NN`); a field is shown so you
+  can paste it manually if needed. You must be logged into Grimoire first (open the notes view).
+- The importer parses `## Monster`, `### Section`, and `**Key:** value` markdown. Section type hints
+  are read from `:::meta … :::` directive blocks (e.g. `type: key-value-pair`, `table-col-row`,
+  `table-row-col`). Anything inside fenced ```` ``` ```` code blocks is ignored.
 
 ## Grimoire view, login & camera
 
@@ -152,16 +183,16 @@ on disk, so you sign in once. The embedded view is granted **camera/mic permissi
 **Insert Image from Camera** works — including the camera dropdown when multiple cameras exist (pick
 a camera other than the one the app is capturing).
 
-## config.yaml (key fields)
+## Configuration files
 
-Global settings plus per-game regions/keywords:
+**`config.yaml`** — global settings (next to the package):
 
 ```yaml
 selected_game: mhs3
 capture: { device_index, width, height, fps }
 virtual_camera: { enabled }
 ocr:
-  engine: easyocr
+  engine: auto                     # auto | easyocr | tesseract
   gpu: true
   poll_fps: 3.0
   monster_persist_s: 12.0          # retention after a name was last seen
@@ -169,11 +200,22 @@ ocr:
   min_confidence_level: low        # low | mid | high
   match_cutoff: 0.7                # fuzzy-match strictness
 ui: { always_on_top: false }
-games:
-  mhs3:
-    regions: { monster_names: [ {x,y,w,h} ], battle_end: {x,y,w,h} }
-    keywords: { battle_end: [result, victory, defeat] }
+logging: { to_file: false }        # write the OCR debug log to logs/ (☰ → Log to file)
 ```
+
+**Per-game settings** live in `games/<id>/settings.json` (written by calibration / Add Game), not
+in `config.yaml`:
+
+```json
+{
+  "regions": { "monster_names": [ {"x":0,"y":0,"w":0,"h":0} ], "battle_end": {"x":0,"y":0,"w":0,"h":0} },
+  "keywords": { "battle_end": ["result", "victory", "defeat"] },
+  "monster_persist_s": 12.0,
+  "monster_persist_end_s": 1.0
+}
+```
+
+The two `monster_persist_*` values are optional per-game overrides of the global `ocr` defaults.
 
 ## Hotkeys
 
@@ -190,17 +232,25 @@ virtual camera; the window shows only the detection navbar and the embedded info
 
 ```
 grimoireassist/
-  __main__.py      entry / CLI / single-instance guard / app icon / game-select
-  config.py        YAML config (global + per-game GameSettings)
+  __main__.py      entry / CLI / single-instance guard / dark theme / app icon / game-select
+  config.py        YAML config (global) + per-game GameSettings (settings.json) + logging toggle
   capture.py       device owner + frame fan-out + named-device enumeration
   virtualcam.py    OBS Virtual Camera sink (clean feed)
-  games.py         game catalog (GameInfo) + bundled monster lists + app icon
-  ocr/             OcrEngine + EasyOCR impl (confidence) + preprocessing + level helpers
+  games.py         game catalog (GameInfo) loader + import-data helpers + app icon
+  ocr/             OcrEngine + EasyOCR/Tesseract impls (confidence) + preprocessing + level helpers
   battle.py        MonsterTracker (persistent + confidence) + match_known + OcrWorker (QThread)
   overlay.py       OverlayModel (UI state)
-  data/            games.json + monsters_<id>.json + icon.ico/png
+  data/            app icon (icon.ico)
   ui/              main window (☰ menu, pills, view switch), monster panel (web views),
-                   calibration dialog, game-select dialog
+                   monster cards, calibration dialog, game-select & add-game dialogs,
+                   import wizard
+
+# Runtime data (next to config.yaml, created/edited at use):
+games/
+  games.json            game catalog
+  <id>/settings.json    per-game regions + keywords + persist overrides
+  <id>/import/          imported monster data.json + images/
+logs/                   OCR debug logs (only when ☰ → Log to file is on)
 ```
 
 ## Tests

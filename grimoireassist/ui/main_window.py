@@ -96,8 +96,9 @@ class MainWindow(QMainWindow):
         self._idle_timer = QTimer(self)
         self._idle_timer.setInterval(1000)
         self._idle_timer.timeout.connect(self._on_idle_tick)
-        # Panel is built by _start_game above, so we can start counting right away.
-        self._start_idle()
+        # Open on the tracking view. The idle countdown to Grimoire only starts once
+        # monsters have been detected and then lost — not on a fresh launch.
+        self._set_grimoire(False)
         self._size_to_screen(0.6)
 
     def _size_to_screen(self, fraction: float) -> None:
@@ -778,7 +779,7 @@ class MainWindow(QMainWindow):
             self._start_idle()
 
     # ================= idle / auto-switch =================
-    _IDLE_TIMEOUT = 4
+    _IDLE_TIMEOUT = 60   # seconds with no monster before switching to Grimoire
 
     def _start_idle(self) -> None:
         if not self._idle_timer.isActive():
