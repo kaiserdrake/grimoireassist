@@ -172,9 +172,11 @@ Grimoire's raw-markdown API and saves them locally to `games/<id>/import/` (`dat
 
 - The API URL is auto-derived from the game's `notes_url` (`?fileId=NN`); a field is shown so you
   can paste it manually if needed. You must be logged into Grimoire first (open the notes view).
-- The importer parses `## Monster`, `### Section`, and `**Key:** value` markdown. Section type hints
-  are read from `:::meta … :::` directive blocks (e.g. `type: key-value-pair`, `table-col-row`,
-  `table-row-col`). Anything inside fenced ```` ``` ```` code blocks is ignored.
+- The importer parses `## Monster`, `### Section`, and `**Key:** value` markdown (the `#`-level is
+  what matters, not the heading text). Anything inside fenced ```` ``` ```` code blocks is ignored.
+- A section can carry a `:::meta … :::` directive block:
+  - `type:` — `key-value-pair` (default), `table-col-row`, or `table-row-col`.
+  - `header: false` — render the section's rows without showing its heading.
 
 ## Grimoire view, login & camera
 

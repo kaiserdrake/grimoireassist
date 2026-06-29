@@ -148,14 +148,22 @@ def _parse_markdown(md: str) -> Dict[str, Any]:
             continue
         if s == ":::" and in_front_matter:
             in_front_matter = False
+            show_header = True
             for fm in front_matter_buf:
                 if fm.startswith("type:"):
                     current_section_type = fm[5:].strip()
-                    # Pre-create section entry so _type is stored even before rows
-                    if current_monster is not None:
-                        result[current_monster].setdefault(
-                            current_section,
-                            {"_type": current_section_type, "rows": []})
+                elif fm.startswith("header:"):
+                    show_header = fm[7:].strip().lower() not in ("false", "no", "0")
+            # Pre-create the section entry so its type / header flag is stored even
+            # before any rows arrive (and so it survives an untyped section).
+            if current_monster is not None:
+                entry = result[current_monster].setdefault(
+                    current_section,
+                    {"_type": current_section_type, "rows": []})
+                if isinstance(entry, dict):
+                    entry["_type"] = current_section_type
+                    if not show_header:
+                        entry["_header"] = False
             continue
 
         if in_front_matter:

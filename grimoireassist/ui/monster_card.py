@@ -7,13 +7,16 @@ from typing import Dict, List, Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 # ── Palette ────────────────────────────────────────────────────────────────────
-_GROUP_BG    = "#15151b"
-_CARD_BG     = "#1e1e2c"
+# The "tabletop" (group bg) is kept a notch lighter than the deepest shadow and the
+# card surface is lifted above it, so the drop shadow has contrast to read against
+# on the dark theme — giving cards a raised, physical feel.
+_GROUP_BG    = "#1a1a22"
+_CARD_BG     = "#2a2a3a"
 _CARD_BDR    = "#4a4a68"
 _CARD_RADIUS = 10
 _NAME_BG     = "#252538"
@@ -30,9 +33,9 @@ _COLS        = 4
 _CARD_MIN_H  = 420   # cards never shrink below this; blank space fills bottom
 
 # Font sizes (px)
-_FS_NAME = 25
-_FS_SECT = 21
-_FS_BODY = 23
+_FS_NAME = 18
+_FS_SECT = 14
+_FS_BODY = 17
 _FS_DIM  = 21
 
 
@@ -108,10 +111,17 @@ class MonsterCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(4, 4, 4, 6)
+        # Generous margins leave room for the drop shadow to fall outside the card
+        # surface so it reads like a physical card resting on the table.
+        outer.setContentsMargins(14, 10, 14, 22)
         outer.setSpacing(0)
 
         frame = _CardFrame(self)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30)
+        shadow.setColor(QColor(0, 0, 0, 220))
+        shadow.setOffset(0, 9)
+        frame.setGraphicsEffect(shadow)
         outer.addWidget(frame)
 
         lay = QVBoxLayout(frame)
@@ -193,7 +203,8 @@ class MonsterCard(QWidget):
             if not first:
                 lay.addSpacing(8)
             first = False
-            if key != "_root":
+            show_header = sec_val.get("_header", True) if isinstance(sec_val, dict) else True
+            if key != "_root" and show_header:
                 lbl = QLabel(key)
                 lbl.setStyleSheet(
                     f"background:{_SECT_BG}; color:{_TEXT_FG};"
