@@ -79,6 +79,11 @@ class UiConfig:
     always_on_top: bool = False
 
 
+@dataclass
+class LoggingConfig:
+    to_file: bool = False  # write the OCR debug log to logs/<ts>.log
+
+
 def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
     """Read a games/<id>/settings.json file into a GameSettings object."""
     try:
@@ -134,6 +139,7 @@ class Config:
     ocr: OcrConfig = field(default_factory=OcrConfig)
     monster_name_list: List[str] = field(default_factory=list)  # active list
     ui: UiConfig = field(default_factory=UiConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     selected_game: Optional[str] = None
     games: Dict[str, GameSettings] = field(default_factory=dict)  # per-game settings
     _path: Optional[Path] = None
@@ -201,6 +207,7 @@ class Config:
         vc = raw.get("virtual_camera", {})
         ocr = raw.get("ocr", {})
         ui = raw.get("ui", {})
+        log = raw.get("logging", {})
 
         # per-game settings
         games: Dict[str, GameSettings] = {}
@@ -243,6 +250,7 @@ class Config:
                 match_cutoff=float(ocr.get("match_cutoff", 0.7)),
             ),
             ui=UiConfig(always_on_top=bool(ui.get("always_on_top", False))),
+            logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
             games=games,
         )
@@ -303,6 +311,7 @@ class Config:
                 "match_cutoff": self.ocr.match_cutoff,
             },
             "ui": {"always_on_top": self.ui.always_on_top},
+            "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.
         }
 

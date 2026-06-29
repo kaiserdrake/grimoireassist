@@ -15,7 +15,7 @@ Source format expected
 ----------------------
   # Game Title          →  _game_title metadata
   ## Monster Name       →  one entry per monster
-  ### Section Name      →  subsection with optional --- type: xxx --- front matter
+  ### Section Name      →  subsection with optional :::meta type: xxx ::: block
   **Key:** value        →  key-value pair (key or value may contain ![img](url))
   | col | col |         →  legacy table rows (still supported)
 """
@@ -116,7 +116,7 @@ def _sec_append(result: Dict, monster: str, section: str,
 def _parse_markdown(md: str) -> Dict[str, Any]:
     """Parse Grimoire-style markdown into the data.json structure.
 
-    Sections may carry a front-matter type hint (between --- delimiters):
+    Sections may carry a type hint inside a :::meta … ::: directive block:
       type: key-value-pair   →  **Key:** value lines rendered as key : value
       type: table-col-row    →  keys become column headers, values become a single row
       type: table-row-col    →  first **…** line is column headers, rest are data rows
@@ -128,25 +128,34 @@ def _parse_markdown(md: str) -> Dict[str, Any]:
     current_section_type: Optional[str] = None
     in_front_matter = False
     front_matter_buf: List[str] = []
+    in_code_block = False
 
     for line in md.splitlines():
         s = line.strip()
 
-        # Front-matter block delimiters (---)
-        if s == "---":
-            if not in_front_matter:
-                in_front_matter = True
-                front_matter_buf = []
-            else:
-                in_front_matter = False
-                for fm in front_matter_buf:
-                    if fm.startswith("type:"):
-                        current_section_type = fm[5:].strip()
-                        # Pre-create section entry so _type is stored even before rows
-                        if current_monster is not None:
-                            result[current_monster].setdefault(
-                                current_section,
-                                {"_type": current_section_type, "rows": []})
+        # Fenced code blocks (``` … ```) — ignore everything inside, including
+        # any metadata-looking content, so it isn't parsed as real data.
+        if s.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
+        # Meta directive block delimiters (:::meta … :::)
+        if s == ":::meta" and not in_front_matter:
+            in_front_matter = True
+            front_matter_buf = []
+            continue
+        if s == ":::" and in_front_matter:
+            in_front_matter = False
+            for fm in front_matter_buf:
+                if fm.startswith("type:"):
+                    current_section_type = fm[5:].strip()
+                    # Pre-create section entry so _type is stored even before rows
+                    if current_monster is not None:
+                        result[current_monster].setdefault(
+                            current_section,
+                            {"_type": current_section_type, "rows": []})
             continue
 
         if in_front_matter:
@@ -279,10 +288,6 @@ class ImportWizard(QDialog):
             "Fetches monster data from the Grimoire API and saves it locally.\n"
             "You must be logged into Grimoire (open the notes view first)."))
 
-        self._go_btn = QPushButton("Import")
-        self._go_btn.clicked.connect(self._start_import)
-        lay.addWidget(self._go_btn)
-
         # Manual URL entry — only shown when auto-derivation fails
         self._url_row = QWidget()
         rl = QHBoxLayout(self._url_row)
@@ -294,6 +299,10 @@ class ImportWizard(QDialog):
             f"{_GRIMOIRE_BASE}/api/note-files/<fileId>/raw")
         rl.addWidget(self._url_edit, 1)
         lay.addWidget(self._url_row)
+
+        self._go_btn = QPushButton("Import")
+        self._go_btn.clicked.connect(self._start_import)
+        lay.addWidget(self._go_btn)
 
         self._status = QLabel("Ready")
         self._status.setStyleSheet("color:#9a9aa3; font-size:12px;")
