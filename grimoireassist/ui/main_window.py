@@ -9,7 +9,9 @@ from typing import List, Optional
 import threading
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import (
+    QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence, QShortcut,
+)
 from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton, QSizePolicy, QToolBar, QToolButton, QVBoxLayout, QWidget,
@@ -96,7 +98,21 @@ class MainWindow(QMainWindow):
         self._idle_timer.timeout.connect(self._on_idle_tick)
         # Panel is built by _start_game above, so we can start counting right away.
         self._start_idle()
-        self.showMaximized()
+        self._size_to_screen(0.6)
+
+    def _size_to_screen(self, fraction: float) -> None:
+        """Size the window to a fraction of the available screen and center it."""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w = int(avail.width() * fraction)
+        h = int(avail.height() * fraction)
+        self.resize(w, h)
+        self.move(
+            avail.x() + (avail.width() - w) // 2,
+            avail.y() + (avail.height() - h) // 2,
+        )
 
     # ================= per-game lifecycle =================
     def _start_game(self, game: Optional[GameInfo]) -> None:
@@ -280,6 +296,10 @@ class MainWindow(QMainWindow):
         self.act_debug.setCheckable(True)
         self.act_debug.setChecked(False)
         self.act_debug.toggled.connect(self._toggle_debug)
+        self.act_log_file = self.menu.addAction("Log to file")
+        self.act_log_file.setCheckable(True)
+        self.act_log_file.setChecked(self.cfg.logging.to_file)
+        self.act_log_file.toggled.connect(self._toggle_file_logging)
 
         self.menu.aboutToShow.connect(self._show_camera_menu)
         self._camera_scan_done.connect(self._rebuild_camera_menu)
@@ -405,7 +425,11 @@ class MainWindow(QMainWindow):
 
     # ================= debug log =================
     def _open_log_file(self):
-        """Return an open append-mode file handle for the session log, creating it once."""
+        """Return an open append-mode file handle for the session log, creating it once.
+
+        Returns None when file logging is disabled in settings."""
+        if not self.cfg.logging.to_file:
+            return None
         if getattr(self, "_log_fh", None) is None:
             import datetime
             from pathlib import Path
@@ -537,18 +561,36 @@ class MainWindow(QMainWindow):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.statusBar().showMessage(msg.splitlines()[0], 5000)
         try:
-            self._open_log_file().write(f"[{ts}] ERROR: {msg}\n")
+            fh = self._open_log_file()
+            if fh:
+                fh.write(f"[{ts}] ERROR: {msg}\n")
         except Exception:
             pass
 
     def _toggle_debug(self, visible: bool) -> None:
         self._debug_widget.setVisible(visible)
 
+    def _toggle_file_logging(self, enabled: bool) -> None:
+        self.cfg.logging.to_file = enabled
+        self.cfg.save()
+        if not enabled:
+            # Stop writing and release the current session log.
+            fh = getattr(self, "_log_fh", None)
+            if fh:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            self._log_fh = None
+            self._log_path = None
+
     def _log_line(self, line: str) -> None:
         """Write one line to both the on-screen widget and the log file."""
         self._debug_log.appendPlainText(line)
         try:
-            self._open_log_file().write(line + "\n")
+            fh = self._open_log_file()
+            if fh:
+                fh.write(line + "\n")
         except Exception:
             pass
 
