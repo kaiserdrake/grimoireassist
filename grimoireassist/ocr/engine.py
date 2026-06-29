@@ -29,8 +29,15 @@ _MAX_SIDE = 1280
 _MIN_HEIGHT = 48
 
 
-def preprocess(crop: np.ndarray) -> np.ndarray:
-    """Grayscale + size-normalise + threshold for readable, low-cost OCR input."""
+def preprocess(crop: np.ndarray, binarize: bool = True) -> np.ndarray:
+    """Grayscale + size-normalise for OCR input.
+
+    `binarize=True` (Tesseract) additionally applies an adaptive threshold —
+    classic OCR reads clean black-on-white best. Neural engines (EasyOCR) are
+    trained on natural grayscale/colour images and LOSE accuracy on binarised
+    input: thresholding fragments stylised/outlined game fonts (e.g. white text
+    with a black border), so they pass `binarize=False` and get the grayscale.
+    """
     if crop is None or crop.size == 0:
         return crop
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
@@ -43,6 +50,8 @@ def preprocess(crop: np.ndarray) -> np.ndarray:
     if abs(scale - 1.0) > 0.05:
         interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=interp)
+    if not binarize:
+        return gray
     thr = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 12
     )

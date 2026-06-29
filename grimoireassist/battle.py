@@ -405,10 +405,13 @@ try:
                         self._last_sig = sig
                         self._last_ocr_t = t0
                         self.tracker.observe(dets, t0)
-                        raw_str = "  |  ".join(
-                            f"{t} ({c:.0%})" for t, c in raw_lines
-                        ) if raw_lines else "—"
-                        self.debug_text.emit(raw_str, [n for n, _ in dets])
+                        # Only log when something was actually read; an empty
+                        # region (no raw + no match) would otherwise flood the log.
+                        if raw_lines:
+                            raw_str = "  |  ".join(
+                                f"{t} ({c:.0%})" for t, c in raw_lines
+                            )
+                            self.debug_text.emit(raw_str, [n for n, _ in dets])
                     else:
                         self.tracker.touch(t0)
                     # Retention shrinks while the Battle-End banner is showing.

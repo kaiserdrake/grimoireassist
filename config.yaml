@@ -1,6 +1,6 @@
 selected_game: mhs3
 capture:
-  device_index: 0
+  device_index: 1
   width: 1920
   height: 1080
   fps: 30
@@ -16,9 +16,9 @@ ocr:
   continuous: true
   monster_persist_s: 12.0
   monster_persist_end_s: 1.0
-  min_confidence_level: mid
+  min_confidence_level: low
   match_cutoff: 0.7
 ui:
   always_on_top: false
 logging:
-  to_file: false
+  to_file: true
