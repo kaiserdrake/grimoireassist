@@ -20,5 +20,7 @@ ocr:
   match_cutoff: 0.7
 ui:
   always_on_top: false
+  auto_start_tracking: true
+  snapshot_hotkey: ctrl+alt+s
 logging:
   to_file: true

@@ -107,10 +107,16 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Select source… ▸** — pick the capture device (live device list).
   - **Retry camera** — re-open the current device (e.g. after another app released it).
   - **Calibrate regions… (F9)** — see above.
+  - **Snapshot frame (Ctrl+Alt+S)** — save the current capture frame to `snapshots/` as a
+    timestamped PNG. The hotkey is **system-wide** (works while the app is unfocused), so it can
+    be bound to a StreamDeck button or macro key that sends the combination. Change it via
+    `ui.snapshot_hotkey` in `config.yaml`.
 - **OCR**
   - **Use GPU** — toggle GPU/CPU OCR live (model reloads on the first read after switching).
   - **Track confidence ▸** — minimum confidence required to track a monster: *Low and up (all)*,
     *Mid and up*, or *High only*. Lower-confidence detections are filtered out.
+  - **Auto-start tracking on launch** — start OCR tracking automatically when the app opens
+    instead of waiting for the **▶ Start** button. **Off by default.**
 - **Game**
   - **Add game…** — add a new game to the catalog (id, name, info-URL template, options).
   - **Switch game…** — reopen the game picker.
@@ -201,7 +207,10 @@ ocr:
   monster_persist_end_s: 1.0       # retention while Battle-End text shows
   min_confidence_level: low        # low | mid | high
   match_cutoff: 0.7                # fuzzy-match strictness
-ui: { always_on_top: false }
+ui:
+  always_on_top: false
+  auto_start_tracking: false       # start OCR tracking as soon as the app opens
+  snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
 logging: { to_file: false }        # write the OCR debug log to logs/ (☰ → Log to file)
 ```
 
@@ -221,10 +230,14 @@ The two `monster_persist_*` values are optional per-game overrides of the global
 
 ## Hotkeys
 
-| Key | Action                  |
-|-----|-------------------------|
-| F9  | Open region calibration |
-| F11 | Toggle fullscreen       |
+| Key        | Action                  | Scope |
+|------------|-------------------------|-------|
+| F9         | Open region calibration | in-app |
+| F11        | Toggle fullscreen       | in-app |
+| Ctrl+Alt+S | Save frame snapshot     | **system-wide** (StreamDeck / macro-key friendly; configurable via `ui.snapshot_hotkey`) |
+
+If the snapshot combination is already taken by another app, GrimoireAssist falls back to an
+in-app shortcut and says so in the status bar — pick a different `ui.snapshot_hotkey` in that case.
 
 ## How it works
 
@@ -238,6 +251,7 @@ grimoireassist/
   config.py        YAML config (global) + per-game GameSettings (settings.json) + logging toggle
   capture.py       device owner + frame fan-out + named-device enumeration
   virtualcam.py    OBS Virtual Camera sink (clean feed)
+  hotkey.py        system-wide hotkey (Win32 RegisterHotKey via Qt native event filter)
   games.py         game catalog (GameInfo) loader + import-data helpers + app icon
   ocr/             OcrEngine + EasyOCR/Tesseract impls (confidence) + preprocessing + level helpers
   battle.py        MonsterTracker (persistent + confidence) + match_known + OcrWorker (QThread)
@@ -253,6 +267,7 @@ games/
   <id>/settings.json    per-game regions + keywords + persist overrides
   <id>/import/          imported monster data.json + images/
 logs/                   OCR debug logs (only when ☰ → Log to file is on)
+snapshots/              frame snapshots saved by the snapshot hotkey (☰ → Snapshot frame)
 ```
 
 ## Tests

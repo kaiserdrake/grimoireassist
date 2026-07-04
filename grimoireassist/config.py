@@ -77,6 +77,8 @@ class GameSettings:
 @dataclass
 class UiConfig:
     always_on_top: bool = False
+    auto_start_tracking: bool = False   # start OCR tracking as soon as the app opens
+    snapshot_hotkey: str = "ctrl+alt+s"  # system-wide hotkey that saves a frame snapshot
 
 
 @dataclass
@@ -249,7 +251,11 @@ class Config:
                 min_confidence_level=str(ocr.get("min_confidence_level", "low")),
                 match_cutoff=float(ocr.get("match_cutoff", 0.7)),
             ),
-            ui=UiConfig(always_on_top=bool(ui.get("always_on_top", False))),
+            ui=UiConfig(
+                always_on_top=bool(ui.get("always_on_top", False)),
+                auto_start_tracking=bool(ui.get("auto_start_tracking", False)),
+                snapshot_hotkey=str(ui.get("snapshot_hotkey", "ctrl+alt+s")),
+            ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
             games=games,
@@ -310,7 +316,11 @@ class Config:
                 "min_confidence_level": self.ocr.min_confidence_level,
                 "match_cutoff": self.ocr.match_cutoff,
             },
-            "ui": {"always_on_top": self.ui.always_on_top},
+            "ui": {
+                "always_on_top": self.ui.always_on_top,
+                "auto_start_tracking": self.ui.auto_start_tracking,
+                "snapshot_hotkey": self.ui.snapshot_hotkey,
+            },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.
         }

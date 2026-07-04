@@ -25,6 +25,7 @@ from ..games import (
     monster_names, monster_imported_data, save_game, slug_map,
     write_default_settings,
 )
+from ..hotkey import GlobalHotkey
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
@@ -100,6 +101,9 @@ class MainWindow(QMainWindow):
         # monsters have been detected and then lost — not on a fresh launch.
         self._set_grimoire(False)
         self._size_to_screen(0.6)
+
+        if cfg.ui.auto_start_tracking and not self._tracking_active:
+            self._toggle_tracking()
 
     def _size_to_screen(self, fraction: float) -> None:
         """Size the window to a fraction of the available screen and center it."""
@@ -193,6 +197,33 @@ class MainWindow(QMainWindow):
             self._stop_worker()
         self._update_tracking_btn()
 
+    def _toggle_auto_start_tracking(self, checked: bool) -> None:
+        self.cfg.ui.auto_start_tracking = checked
+        self.cfg.save()
+        self.statusBar().showMessage(
+            "Tracking will start automatically on launch" if checked
+            else "Tracking will wait for Start on launch", 3000)
+
+    # ================= frame snapshot =================
+    def _save_snapshot(self) -> None:
+        """Save the latest captured frame to snapshots/ as a timestamped PNG."""
+        frame, _ = self.buffer.get()
+        if frame is None:
+            self.statusBar().showMessage("Snapshot: no frame captured yet", 3000)
+            return
+        import datetime
+        from pathlib import Path
+        import cv2
+        out_dir = (Path(self.cfg._path).parent if self.cfg._path else Path(".")) / "snapshots"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # millisecond precision so rapid macro-key presses don't collide
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        path = out_dir / f"snapshot_{ts}.png"
+        if cv2.imwrite(str(path), frame):
+            self.statusBar().showMessage(f"Snapshot saved: {path.name}", 4000)
+        else:
+            self.statusBar().showMessage(f"Snapshot failed to write {path.name}", 4000)
+
     def _add_game(self) -> None:
         from .add_game_dialog import AddGameDialog
         dlg = AddGameDialog(self.cfg._path, parent=self)
@@ -256,6 +287,8 @@ class MainWindow(QMainWindow):
         self.camera_menu = self.menu.addMenu("Select source…")
         self.menu.addAction("Retry camera", self._retry_camera)
         self.menu.addAction("Calibrate regions…\tF9", self._open_calibration)
+        _snap_label = self.cfg.ui.snapshot_hotkey.replace(" ", "").title()
+        self.menu.addAction(f"Snapshot frame\t{_snap_label}", self._save_snapshot)
 
         # ── OCR ─────────────────────────────────────────────────
         self.menu.addSection("OCR")
@@ -274,6 +307,10 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, lv=level: self._set_min_confidence(lv))
             conf_group.addAction(act)
             conf_menu.addAction(act)
+        self.act_auto_track = self.menu.addAction("Auto-start tracking on launch")
+        self.act_auto_track.setCheckable(True)
+        self.act_auto_track.setChecked(self.cfg.ui.auto_start_tracking)
+        self.act_auto_track.toggled.connect(self._toggle_auto_start_tracking)
 
         # ── Game ─────────────────────────────────────────────────
         self.menu.addSection("Game")
@@ -423,6 +460,17 @@ class MainWindow(QMainWindow):
     def _build_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
+        # Snapshot hotkey is registered system-wide (RegisterHotKey) so it fires
+        # even when the app is unfocused — e.g. from a StreamDeck / macro key.
+        self._snapshot_hotkey = GlobalHotkey(self._save_snapshot)
+        seq = self.cfg.ui.snapshot_hotkey
+        if seq and not self._snapshot_hotkey.register(seq):
+            # Combination taken by another app (or invalid) — fall back to an
+            # in-app shortcut so the menu entry's key still works when focused.
+            QShortcut(QKeySequence(seq), self, activated=self._save_snapshot)
+            self.statusBar().showMessage(
+                f"Could not register global hotkey '{seq}' (in use by another app?)"
+                " — snapshot works only while this window has focus", 8000)
 
     # ================= debug log =================
     def _open_log_file(self):
@@ -835,6 +883,8 @@ class MainWindow(QMainWindow):
 
     # ================= shutdown =================
     def closeEvent(self, event) -> None:
+        if getattr(self, "_snapshot_hotkey", None):
+            self._snapshot_hotkey.unregister()
         if self.worker:
             self.worker.stop()
             self.worker.wait(1500)
