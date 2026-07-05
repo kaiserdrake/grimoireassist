@@ -155,7 +155,7 @@ defines where monster info comes from:
 | `multi_joiner` | separator for multiple monsters (search style) | `" \|\| "` |
 | `requires_login` | monster view uses the persistent logged-in profile | `false` |
 | `notes_url` | the secondary view shown in `Grimoire` mode (blank → grimoire) | `""` |
-| `cards_per_row` | monster cards shown per row in the panel | `4` |
+| `cards_per_row` | max monster cards per row in the panel (columns drop automatically on narrow windows, down to one full-width card per row) | `4` |
 
 Built-in games:
 

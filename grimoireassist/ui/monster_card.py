@@ -28,15 +28,17 @@ _DIM_FG      = "#6b6b75"
 
 # ── Sizes (70 % of original fullscreen scale) ─────────────────────────────────
 _ICON_SIZE   = 34
-_PORTRAIT_H  = 210
+_PORTRAIT_H  = 150
 _COLS        = 4
 _CARD_MIN_H  = 420   # cards never shrink below this; blank space fills bottom
+_CARD_MIN_W  = 340   # narrowest a card column may get before a column is dropped
 
 # Font sizes (px)
-_FS_NAME = 18
-_FS_SECT = 14
-_FS_BODY = 17
-_FS_DIM  = 21
+_FS_NAME  = 18
+_FS_SECT  = 14
+_FS_BODY  = 17
+_FS_TABLE = 20   # table cells read from a distance more than prose rows
+_FS_DIM   = 21
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -233,7 +235,7 @@ class MonsterCard(QWidget):
         return lbl
 
     def _cell_widget(self, cell: dict, image_base: Optional[Path],
-                     is_key: bool = False) -> QWidget:
+                     is_key: bool = False, font_px: int = _FS_BODY) -> QWidget:
         w = QWidget()
         w.setStyleSheet("background:transparent;")
         cl = QHBoxLayout(w)
@@ -245,8 +247,8 @@ class MonsterCard(QWidget):
                 cl.addWidget(il)
         text = cell.get("text", "")
         if text:
-            lbl = (_key_label(text) if is_key
-                   else _val_label(text))
+            lbl = (_key_label(text, font_px) if is_key
+                   else _val_label(text, font_px))
             cl.addWidget(lbl)
         return w
 
@@ -258,10 +260,12 @@ class MonsterCard(QWidget):
         grid.setSpacing(4)
         for col, row in enumerate(rows):
             grid.addWidget(
-                self._cell_widget(row[0] if row else {}, image_base, is_key=True),
+                self._cell_widget(row[0] if row else {}, image_base,
+                                  is_key=True, font_px=_FS_TABLE),
                 0, col, Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(
-                self._cell_widget(row[1] if len(row) > 1 else {}, image_base),
+                self._cell_widget(row[1] if len(row) > 1 else {}, image_base,
+                                  font_px=_FS_TABLE),
                 1, col, Qt.AlignmentFlag.AlignCenter)
         return w
 
@@ -274,7 +278,8 @@ class MonsterCard(QWidget):
         for r_i, row in enumerate(rows):
             for c_i, cell in enumerate(row):
                 grid.addWidget(
-                    self._cell_widget(cell, image_base, is_key=(r_i == 0)),
+                    self._cell_widget(cell, image_base, is_key=(r_i == 0),
+                                      font_px=_FS_TABLE),
                     r_i, c_i, Qt.AlignmentFlag.AlignCenter)
         return w
 
@@ -335,11 +340,16 @@ class MonsterCard(QWidget):
 # ── Card group ─────────────────────────────────────────────────────────────────
 
 class MonsterCardGroup(QWidget):
+    """Card grid with responsive columns: `cols` is the maximum; columns are
+    dropped as the panel narrows (each card keeps ≥ _CARD_MIN_W), down to a
+    single full-width column where cards stack vertically."""
+
     open_web = pyqtSignal(str)
 
     def __init__(self, cols: int = _COLS, parent=None) -> None:
         super().__init__(parent)
-        self._cols = max(1, cols)
+        self._max_cols = max(1, cols)
+        self._cols = self._max_cols
         self.setStyleSheet(f"QWidget {{ background:{_GROUP_BG}; }}")
 
         scroll = QScrollArea()
@@ -357,8 +367,7 @@ class MonsterCardGroup(QWidget):
         self._grid.setContentsMargins(16, 12, 16, 12)
         self._grid.setHorizontalSpacing(20)  # gap between card columns
         self._grid.setVerticalSpacing(12)     # gap between card rows
-        for c in range(self._cols):
-            self._grid.setColumnStretch(c, 1)
+        self._apply_column_stretch()
 
         scroll.setWidget(self._container)
 
@@ -372,6 +381,36 @@ class MonsterCardGroup(QWidget):
     def set_image_base(self, path: Optional[Path]) -> None:
         self._image_base = path
 
+    # ── responsive columns ─────────────────────────────────────────────────────
+    def _effective_cols(self) -> int:
+        """Columns that fit at the current width, capped at the per-game max."""
+        m = self._grid.contentsMargins()
+        avail = self.width() - m.left() - m.right()
+        sp = self._grid.horizontalSpacing()
+        fit = (avail + sp) // (_CARD_MIN_W + sp)
+        return max(1, min(self._max_cols, fit))
+
+    def _apply_column_stretch(self) -> None:
+        # Stretch only the active columns; zero the rest so dropped columns
+        # from a previous layout don't keep claiming width.
+        for c in range(max(self._grid.columnCount(), self._max_cols)):
+            self._grid.setColumnStretch(c, 1 if c < self._cols else 0)
+
+    def _place_cards(self) -> None:
+        self._apply_column_stretch()
+        for i, card in enumerate(self._cards):
+            grid_row, grid_col = divmod(i, self._cols)
+            self._grid.addWidget(card, grid_row, grid_col, Qt.AlignmentFlag.AlignTop)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        cols = self._effective_cols()
+        if cols != self._cols:
+            self._cols = cols
+            for card in self._cards:
+                self._grid.removeWidget(card)
+            self._place_cards()
+
     def show_monsters(self, names: List[str],
                       imported: Dict[str, dict]) -> None:
         for card in self._cards:
@@ -379,13 +418,13 @@ class MonsterCardGroup(QWidget):
             card.deleteLater()
         self._cards.clear()
 
-        for i, name in enumerate(names):
+        self._cols = self._effective_cols()
+        for name in names:
             sections = imported.get(name)
             card = MonsterCard(name, sections, self._image_base)
             card.open_web.connect(self.open_web)
-            grid_row, grid_col = divmod(i, self._cols)
-            self._grid.addWidget(card, grid_row, grid_col, Qt.AlignmentFlag.AlignTop)
             self._cards.append(card)
+        self._place_cards()
 
     def clear(self) -> None:
         self.show_monsters([], {})
