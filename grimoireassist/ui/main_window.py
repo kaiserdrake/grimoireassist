@@ -13,9 +13,9 @@ from PyQt6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QSizePolicy, QSplitter, QToolBar, QToolButton, QVBoxLayout,
-    QWidget,
+    QApplication, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QToolBar,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..battle import OcrWorker
@@ -85,7 +85,10 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self.browser)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.setStretchFactor(0, 1)
-        self._splitter.setStretchFactor(1, 3)
+        self._splitter.setStretchFactor(1, 1)
+        # main-pane share of the splitter; updated when the drawer closes so
+        # a user-dragged ratio survives toggling the browser off and on
+        self._main_ratio = 0.5
         self._splitter.setStyleSheet(
             "QSplitter::handle { background:#2a2a36; }")
         self.setCentralWidget(self._splitter)
@@ -209,12 +212,22 @@ class MainWindow(QMainWindow):
         if open_:
             self.browser.ensure_ready()
             self.browser.setVisible(True)
-            # 25% main view / 75% browser
+            # restore the last user-chosen split (50/50 by default)
             total = max(self._splitter.width(), 1)
-            main_w = round(total * 0.25)
+            main_w = round(total * self._main_ratio)
             self._splitter.setSizes([main_w, total - main_w])
             self.browser.focus_url_bar()
         else:
+            sizes = self._splitter.sizes()
+            if sizes[1] > 0:
+                self._main_ratio = sizes[0] / (sizes[0] + sizes[1])
+            # Drop focus held inside the drawer before hiding it. Hiding the
+            # focused widget makes Qt tab-focus the next widget — the grimoire
+            # web view — and Chromium renders tab-focus as a focus ring around
+            # the page (the white "selection" box).
+            fw = QApplication.focusWidget()
+            if fw is not None and self.browser.isAncestorOf(fw):
+                fw.clearFocus()
             self.browser.setVisible(False)  # main pane auto-fills 100%
         self.browser_btn.setChecked(open_)
 

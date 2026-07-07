@@ -7,6 +7,7 @@
     "multi_joiner": " || ",
     "requires_login": true,
     "notes_url": "https://grimoire.laeradsphere.com",
+	"bookmarks_url": "https://grimoire.laeradsphere.com/api/note-files/12/raw",
     "cards_per_row": 3
   },
   {
@@ -17,6 +18,7 @@
     "multi_joiner": " || ",
     "requires_login": false,
     "notes_url": "",
+	"bookmarks_url": "",
     "cards_per_row": 4
   }
 ]

@@ -1,8 +1,8 @@
 """In-app tabbed web browser drawer.
 
-Sits in the right pane of the main-window splitter: when open it takes 75%
-of the width and the tracking/grimoire view keeps 25%; when closed the main
-view fills the window. Tabs share one persistent QWebEngineProfile
+Sits in the right pane of the main-window splitter: when open it takes 50%
+of the width by default (the last user-dragged ratio is restored on reopen);
+when closed the main view fills the window. Tabs share one persistent QWebEngineProfile
 ("browser_persistent" — separate from the grimoire view's profile, which is
 recreated on every game switch) so logins survive restarts.
 
