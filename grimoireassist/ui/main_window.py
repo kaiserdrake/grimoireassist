@@ -14,7 +14,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QSizePolicy, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSplitter, QToolBar, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from ..battle import OcrWorker
@@ -29,6 +30,7 @@ from ..hotkey import GlobalHotkey
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
+from .browser import BrowserPanel
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
@@ -66,6 +68,27 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
         self._debug_widget = self._build_debug_panel()
         self._debug_widget.setVisible(False)
+
+        # Permanent central splitter: [main view host | browser drawer].
+        # _start_game only swaps the child of _main_host, so the browser
+        # (and its tabs) survives game switches.
+        self._main_host = QWidget()
+        _host_lay = QVBoxLayout(self._main_host)
+        _host_lay.setContentsMargins(0, 0, 0, 0)
+        _host_lay.setSpacing(0)
+        self.browser = BrowserPanel()
+        self.browser.setVisible(False)   # drawer starts closed
+        self.browser.status_message.connect(
+            lambda msg: self.statusBar().showMessage(msg, 4000))
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self._main_host)
+        self._splitter.addWidget(self.browser)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 3)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle { background:#2a2a36; }")
+        self.setCentralWidget(self._splitter)
 
         # capture is global (one camera feeds every game)
         self._start_capture(cfg.capture.device_index)
@@ -153,8 +176,11 @@ class MainWindow(QMainWindow):
         wlay.setSpacing(0)
         wlay.addWidget(self.panel, 1)
         wlay.addWidget(self._debug_widget)
-        self.setCentralWidget(wrapper)
+        self._set_main_widget(wrapper)
         self._refresh_panel()
+
+        # bookmarks follow the game (covers startup and every switch)
+        self.browser.set_game_bookmarks(game.bookmarks_url)
 
         # Only (re)start the OCR worker if tracking was already active.
         # On first load _tracking_active is False, so we wait for the user
@@ -163,6 +189,34 @@ class MainWindow(QMainWindow):
             self._start_worker()
         else:
             self._stop_worker()
+
+    def _set_main_widget(self, w: QWidget) -> None:
+        """Swap the left (main view) pane of the splitter. The new wrapper has
+        already re-parented _debug_widget into itself, so deleting the old
+        wrapper is safe."""
+        lay = self._main_host.layout()
+        while lay.count():
+            old = lay.takeAt(0).widget()
+            if old is not None:
+                old.deleteLater()
+        lay.addWidget(w)
+
+    # ================= browser drawer =================
+    def _toggle_browser(self) -> None:
+        self._set_browser_open(not self.browser.isVisible())
+
+    def _set_browser_open(self, open_: bool) -> None:
+        if open_:
+            self.browser.ensure_ready()
+            self.browser.setVisible(True)
+            # 25% main view / 75% browser
+            total = max(self._splitter.width(), 1)
+            main_w = round(total * 0.25)
+            self._splitter.setSizes([main_w, total - main_w])
+            self.browser.focus_url_bar()
+        else:
+            self.browser.setVisible(False)  # main pane auto-fills 100%
+        self.browser_btn.setChecked(open_)
 
     def _start_worker(self) -> None:
         if self.worker is not None:
@@ -370,6 +424,17 @@ class MainWindow(QMainWindow):
         self.view_switch.set_mode("auto" if self._auto_switch else "grimoire")
         self.view_switch.mode_changed.connect(self._on_view_mode)
         tb.addWidget(self.view_switch)
+        tb.addSeparator()
+
+        # Browser drawer toggle.
+        self.browser_btn = QToolButton()
+        self.browser_btn.setText("🌐")
+        self.browser_btn.setCheckable(True)
+        self.browser_btn.setToolTip("Toggle browser (Ctrl+B)")
+        self.browser_btn.setStyleSheet(
+            "QToolButton { font-size:15px; padding:2px 8px; }")
+        self.browser_btn.clicked.connect(self._toggle_browser)
+        tb.addWidget(self.browser_btn)
 
     def _start_warmup(self) -> None:
         """Pre-load the OCR model in the background. Start is always enabled
@@ -460,6 +525,7 @@ class MainWindow(QMainWindow):
     def _build_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_browser)
         # Snapshot hotkey is registered system-wide (RegisterHotKey) so it fires
         # even when the app is unfocused — e.g. from a StreamDeck / macro key.
         self._snapshot_hotkey = GlobalHotkey(self._save_snapshot)

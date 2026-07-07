@@ -58,6 +58,11 @@ class AddGameDialog(QDialog):
         self._notes_url.setPlaceholderText("Optional — secondary notes/grimoire URL")
         form.addRow("Notes URL:", self._notes_url)
 
+        self._bookmarks_url = QLineEdit()
+        self._bookmarks_url.setPlaceholderText(
+            "Optional — raw markdown URL with a '# Bookmarks' section")
+        form.addRow("Bookmarks URL:", self._bookmarks_url)
+
         self._login = QCheckBox("Requires login (use persistent browser session)")
         form.addRow("", self._login)
 
@@ -112,6 +117,7 @@ class AddGameDialog(QDialog):
             notes_url=self._notes_url.text().strip(),
             requires_login=self._login.isChecked(),
             cards_per_row=self._cards_per_row.value(),
+            bookmarks_url=self._bookmarks_url.text().strip(),
         )
         save_game(game, self._config_path)
         write_default_settings(game_id, self._config_path)
