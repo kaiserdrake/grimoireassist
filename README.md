@@ -46,17 +46,65 @@ window shows the same icon.
 
 ### GPU acceleration (recommended)
 
-OCR is much faster on an NVIDIA GPU. The default install pulls **CPU-only** PyTorch; install the
-CUDA build once:
+OCR is much faster on an NVIDIA GPU. `ocr.gpu` defaults to **`auto`**: the GPU is used whenever
+CUDA is available, with silent fallback to CPU otherwise. **☰ → Use GPU** overrides it either way
+(and pins the choice in `config.yaml` as `true`/`false`).
+
+- The **portable build** ships CUDA-enabled PyTorch — GPU works out of the box, nothing to do.
+- A **source install** pulls CPU-only PyTorch by default; install the CUDA build once:
 
 ```bat
 .venv\Scripts\activate
 pip install --force-reinstall torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Then enable it via **☰ → Use GPU for OCR** (or `ocr.gpu: true` in `config.yaml`). Verify with
-`python -c "import torch; print(torch.cuda.is_available())"` → `True`. (Use `cu121` for older
-drivers.) No NVIDIA GPU? Leave GPU off — it runs on CPU.
+Verify with `python -c "import torch; print(torch.cuda.is_available())"` → `True`. (Use `cu121`
+for older drivers.) No NVIDIA GPU? Nothing to do — `auto` resolves to CPU.
+
+## Portable build (no Python required)
+
+The app can also be distributed as a **portable folder**: extract
+`GrimoireAssist-v<version>-win64.7z` anywhere and run `GrimoireAssist.exe` — no Python, no
+install, no admin rights. (Windows 11 Explorer extracts `.7z` natively; on Windows 10 install
+[7-Zip](https://www.7-zip.org/).) All user data (`config.yaml`, `games/`, `logs/`, `snapshots/`)
+is created **next to the exe**, so the folder is self-contained and can be moved or copied to a
+USB stick. Web logins live in `%AppData%\GrimoireAssist` and survive updates. The build bundles
+CUDA-enabled PyTorch, so it's a single archive for everyone (see the GPU section — `auto` falls
+back to CPU on machines without an NVIDIA GPU); the trade-off is size (~1.5 GB download, ~4 GB
+unpacked).
+
+### Building a release
+
+```bat
+build.bat
+```
+
+That's the whole build: it creates a clean `.venv-build` (first run only), installs CUDA torch +
+`requirements.txt` + PyInstaller, runs PyInstaller with `GrimoireAssist.spec`, and packs the
+result (7z/LZMA2 — a plain zip would exceed GitHub's 2 GiB release-asset limit; needs
+[7-Zip](https://www.7-zip.org/) installed):
+
+- `dist\GrimoireAssist\GrimoireAssist.exe` — smoke-test this (window opens, camera list
+  populates, ☰ → Test OCR works, Grimoire page loads). Ideally test on a machine **without
+  Python** and from a path with spaces.
+- `dist\GrimoireAssist-v<version>-win64.7z` — the release asset.
+
+### Releasing an update
+
+One-time setup: authenticate the [GitHub CLI](https://cli.github.com/) with `gh auth login`.
+
+1. Change the code, run `pytest`, commit and push.
+2. Bump `__version__` in `grimoireassist/__init__.py` (shown in the title bar and `--version`);
+   commit and push.
+3. `build.bat` → smoke test → `release.bat`.
+
+`release.bat` reads the version from the package, refuses to overwrite an existing release, tags
+the commit (`v<version>`), pushes the tag, and publishes a GitHub release with the `.7z` attached
+(`gh release create --generate-notes`).
+
+**User update flow:** extract the new archive *next to* the old folder (not over it), copy
+`config.yaml` and the `games/` folder across (calibrated regions + imported monster data), delete
+the old folder. Logins carry over automatically via `%AppData%`.
 
 ### CLI flags
 
@@ -201,7 +249,7 @@ capture: { device_index, width, height, fps }
 virtual_camera: { enabled }
 ocr:
   engine: auto                     # auto | easyocr | tesseract
-  gpu: true
+  gpu: auto                        # auto (GPU iff CUDA is available) | true | false
   poll_fps: 3.0
   monster_persist_s: 12.0          # retention after a name was last seen
   monster_persist_end_s: 1.0       # retention while Battle-End text shows

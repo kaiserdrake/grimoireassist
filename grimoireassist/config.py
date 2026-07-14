@@ -8,9 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import yaml
+
+
+def _parse_gpu(value) -> Union[bool, str]:
+    """ocr.gpu accepts true / false / "auto" (use the GPU iff CUDA is available)."""
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    return bool(value)
 
 
 @dataclass
@@ -50,7 +57,7 @@ class OcrConfig:
     engine: str = "auto"
     poll_fps: float = 3.0
     languages: List[str] = field(default_factory=lambda: ["en"])
-    gpu: bool = False
+    gpu: Union[bool, str] = "auto"   # true | false | "auto" (GPU iff CUDA is available)
     debounce_frames: int = 3
     continuous: bool = True  # vestigial; monster detection is always on
     monster_persist_s: float = 12.0      # keep a monster this long after it's last seen
@@ -61,6 +68,16 @@ class OcrConfig:
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
     regions_battle_end: Region = field(default_factory=Region)
     keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
+
+    def gpu_effective(self) -> bool:
+        """Resolve the gpu setting to a concrete bool ("auto" → CUDA available?)."""
+        if self.gpu == "auto":
+            try:
+                import torch
+                return bool(torch.cuda.is_available())
+            except Exception:
+                return False
+        return bool(self.gpu)
 
 
 @dataclass
@@ -244,7 +261,7 @@ class Config:
                 engine=str(ocr.get("engine", "easyocr")),
                 poll_fps=float(ocr.get("poll_fps", 3.0)),
                 languages=list(ocr.get("languages", ["en"])),
-                gpu=bool(ocr.get("gpu", False)),
+                gpu=_parse_gpu(ocr.get("gpu", "auto")),
                 debounce_frames=int(ocr.get("debounce_frames", 3)),
                 continuous=bool(ocr.get("continuous", True)),
                 monster_persist_s=float(ocr.get("monster_persist_s", 12.0)),

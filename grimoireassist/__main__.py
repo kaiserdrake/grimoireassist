@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__, app_root
 from .config import Config
 
 
@@ -46,7 +47,12 @@ def _list_devices() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="grimoireassist")
-    parser.add_argument("-c", "--config", default="config.yaml", help="path to config.yaml")
+    # Default next to the exe (frozen) / repo root (source), NOT the CWD — a
+    # taskbar shortcut or "open with" launch can start us anywhere.
+    parser.add_argument("-c", "--config", default=str(app_root() / "config.yaml"),
+                        help="path to config.yaml")
+    parser.add_argument("--version", action="version",
+                        version=f"GrimoireAssist {__version__}")
     parser.add_argument("--list-devices", action="store_true",
                         help="list capture device indices and exit")
     parser.add_argument("--video", help="read from a video file instead of a device (testing)")

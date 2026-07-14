@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
+from .. import __version__
 from ..battle import OcrWorker
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
 from ..config import Config, GameSettings
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         self.model = OverlayModel()
         self.buffer = FrameBuffer()
         self.vcam = VirtualCamSink(fps=cfg.capture.fps) if cfg.virtual_camera.enabled else None
-        self.engine = build_engine(cfg.ocr.engine, cfg.ocr.languages, cfg.ocr.gpu)
+        self.engine = build_engine(cfg.ocr.engine, cfg.ocr.languages, cfg.ocr.gpu_effective())
 
         self.capture: Optional[CaptureThread] = None
         self.worker: Optional[OcrWorker] = None
@@ -149,7 +150,7 @@ class MainWindow(QMainWindow):
     # ================= per-game lifecycle =================
     def _start_game(self, game: Optional[GameInfo]) -> None:
         if game is None:
-            self.setWindowTitle("GrimoireAssist")
+            self.setWindowTitle(f"GrimoireAssist {__version__}")
             return
         self.game = game
         self.cfg.selected_game = game.id
@@ -159,7 +160,7 @@ class MainWindow(QMainWindow):
         self.cfg.ocr.regions_battle_end = gs.battle_end
         self.cfg.ocr.keywords_battle_end = gs.end_keywords
         self.cfg.save()
-        self.setWindowTitle(f"GrimoireAssist — {game.name}")
+        self.setWindowTitle(f"GrimoireAssist {__version__} — {game.name}")
 
         # (re)build panel for this game's site + slugs
         self.model = OverlayModel()
@@ -362,7 +363,7 @@ class MainWindow(QMainWindow):
         self.menu.addSection("OCR")
         self.act_gpu = self.menu.addAction("Use GPU")
         self.act_gpu.setCheckable(True)
-        self.act_gpu.setChecked(self.cfg.ocr.gpu)
+        self.act_gpu.setChecked(self.cfg.ocr.gpu_effective())
         self.act_gpu.toggled.connect(self._toggle_gpu)
         conf_menu = self.menu.addMenu("Track confidence")
         conf_group = QActionGroup(conf_menu)
