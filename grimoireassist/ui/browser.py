@@ -3,8 +3,8 @@
 Sits in the right pane of the main-window splitter: when open it takes 50%
 of the width by default (the last user-dragged ratio is restored on reopen);
 when closed the main view fills the window. Tabs share one persistent QWebEngineProfile
-("browser_persistent" — separate from the grimoire view's profile, which is
-recreated on every game switch) so logins survive restarts.
+("browser_persistent" — separate from the grimoire view's shared profile) so
+logins survive restarts.
 
 New tabs show the current game's bookmarks, fetched from a raw-markdown
 Grimoire endpoint (game.bookmarks_url). Bookmarks live under a heading:
@@ -223,9 +223,9 @@ class BrowserPanel(QWidget):
 
     def _ensure_profile(self) -> None:
         if self._profile is None:
-            # A *named* profile is persistent (disk cache + storage); keep it
-            # distinct from the grimoire view's profile, which is recreated on
-            # every game switch and would contend for the same storage dir.
+            # A *named* profile is persistent (disk cache + storage); kept
+            # distinct from the grimoire view's shared profile so drawer
+            # browsing (history, cache) stays out of the grimoire storage.
             self._profile = QWebEngineProfile(_BROWSER_PROFILE_NAME, self)
             self._profile.setPersistentCookiesPolicy(
                 QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)

@@ -8,6 +8,32 @@ from pathlib import Path
 from .config import Config
 
 
+def _migrate_webengine_storage() -> None:
+    """One-time copy of QtWebEngine storage (cookies, logins) from the old
+    interpreter-named location (…/Roaming/python[w]/QtWebEngine) to the
+    GrimoireAssist one. Must run after setApplicationName and before any web
+    profile is created; a no-op once the new directory exists."""
+    import shutil
+    from PyQt6.QtCore import QStandardPaths
+    new_root = Path(QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.AppDataLocation)) / "QtWebEngine"
+    if new_root.exists():
+        return
+    old_roots = [p for name in ("pythonw", "python")
+                 if (p := new_root.parent.parent / name / "QtWebEngine").is_dir()]
+    if not old_roots:
+        return
+
+    def freshness(root: Path) -> float:
+        stamps = [c.stat().st_mtime for c in root.glob("*/Cookies")]
+        return max(stamps) if stamps else root.stat().st_mtime
+
+    try:
+        shutil.copytree(max(old_roots, key=freshness), new_root)
+    except Exception:
+        pass  # worst case the user logs in again
+
+
 def _list_devices() -> int:
     from .capture import list_devices
     found = list_devices()
@@ -178,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     app = QApplication(sys.argv)
+    # A stable application name gives QtWebEngine one storage directory
+    # (…/AppData/Roaming/GrimoireAssist) regardless of which interpreter
+    # (python.exe / pythonw.exe) launched us, so web logins persist either way.
+    app.setApplicationName("GrimoireAssist")
+    _migrate_webengine_storage()
     _icon = icon_path()
     if _icon:
         app.setWindowIcon(QIcon(_icon))

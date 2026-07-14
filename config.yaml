@@ -22,5 +22,6 @@ ui:
   always_on_top: false
   auto_start_tracking: true
   snapshot_hotkey: ctrl+alt+s
+  browser_split_ratio: 0.5
 logging:
   to_file: true

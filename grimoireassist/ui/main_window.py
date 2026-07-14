@@ -87,8 +87,9 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
         # main-pane share of the splitter; updated when the drawer closes so
-        # a user-dragged ratio survives toggling the browser off and on
-        self._main_ratio = 0.5
+        # a user-dragged ratio survives toggling the browser off and on.
+        # Loaded from config (saved on exit) so it also survives restarts.
+        self._main_ratio = min(max(cfg.ui.browser_split_ratio, 0.1), 0.9)
         self._splitter.setStyleSheet(
             "QSplitter::handle { background:#2a2a36; }")
         self.setCentralWidget(self._splitter)
@@ -902,7 +903,7 @@ class MainWindow(QMainWindow):
     def _on_monster_killed(self, name: str) -> None:
         self.model.remove_monster(name)
         self._refresh_panel()
-        if not self.model.monsters:
+        if self._auto_switch and not self.model.monsters:
             self._start_idle()
 
     # ================= idle / auto-switch =================
@@ -962,6 +963,15 @@ class MainWindow(QMainWindow):
 
     # ================= shutdown =================
     def closeEvent(self, event) -> None:
+        # Persist the browser split ratio (kept in memory while the user drags;
+        # only written to config here, once, on exit).
+        if self.browser.isVisible():
+            sizes = self._splitter.sizes()
+            if sizes[1] > 0:
+                self._main_ratio = sizes[0] / (sizes[0] + sizes[1])
+        if self._main_ratio != self.cfg.ui.browser_split_ratio:
+            self.cfg.ui.browser_split_ratio = self._main_ratio
+            self.cfg.save()
         if getattr(self, "_snapshot_hotkey", None):
             self._snapshot_hotkey.unregister()
         if self.worker:

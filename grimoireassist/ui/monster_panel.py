@@ -17,7 +17,10 @@ from urllib.parse import quote
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve, QRectF, Qt, QUrl, QVariantAnimation, pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -41,6 +44,21 @@ except Exception:  # pragma: no cover - WebEngine missing
 
 GRIMOIRE_URL = "https://grimoire.laeradsphere.com/"
 _GRIMOIRE_PROFILE_NAME = "grimoire_persistent"
+
+_shared_profile: "Optional[QWebEngineProfile]" = None
+
+
+def shared_grimoire_profile() -> "QWebEngineProfile":
+    """The persistent (logged-in) grimoire profile, shared by every
+    MonsterPanel. One long-lived instance: MonsterPanel is rebuilt on each
+    game switch, and two live same-named profiles over one storage directory
+    is unsupported by Qt (cookie persistence can silently break)."""
+    global _shared_profile
+    if _shared_profile is None:
+        _shared_profile = QWebEngineProfile(_GRIMOIRE_PROFILE_NAME)
+        _shared_profile.setPersistentCookiesPolicy(
+            QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+    return _shared_profile
 
 
 def _inject_clipboard_fix(page) -> None:
@@ -252,36 +270,84 @@ class MonsterNav(QWidget):
 
 
 class ViewModeSwitch(QWidget):
-    """Two-position switch: 'Auto Switch' (default) vs 'Grimoire' (locked)."""
+    """Sliding two-position toggle: 'Auto Switch' vs 'Grimoire'.
+
+    Auto Switch follows detections (tracking view while monsters are seen,
+    Grimoire after the idle timeout); Grimoire pins the Grimoire view
+    regardless of detections. A highlight slides behind the active label."""
 
     mode_changed = pyqtSignal(str)  # "auto" | "grimoire"
 
+    _LABELS = ("Auto Switch", "Grimoire")
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        self._auto = QPushButton("Auto Switch")
-        self._gri = QPushButton("Grimoire")
-        for b in (self._auto, self._gri):
-            b.setCheckable(True)
-            b.setAutoExclusive(True)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._auto.setChecked(True)
-        self._auto.clicked.connect(lambda: self.mode_changed.emit("auto"))
-        self._gri.clicked.connect(lambda: self.mode_changed.emit("grimoire"))
-        row.addWidget(self._auto)
-        row.addWidget(self._gri)
-        self.setStyleSheet(
-            "QPushButton { background:#2a2a36; color:#cfcfd6; border:none;"
-            " padding:4px 12px; font-size:12px; }"
-            "QPushButton:checked { background:#5b3fa6; color:#ffffff; font-weight:600; }")
+        self._mode = "auto"
+        self._knob = 0.0   # highlight position: 0 = Auto Switch, 1 = Grimoire
+        self._anim = QVariantAnimation(self, duration=140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_anim)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        f = self.font()
+        f.setPixelSize(12)
+        self.setFont(f)
+        fm = self.fontMetrics()
+        # each half fits the widest label (bold, so the active state doesn't clip)
+        f.setBold(True)
+        self._half = max(QFontMetrics(f).horizontalAdvance(t)
+                         for t in self._LABELS) + 24
+        self.setFixedSize(self._half * 2, 24)
 
     def mode(self) -> str:
-        return "auto" if self._auto.isChecked() else "grimoire"
+        return self._mode
 
     def set_mode(self, mode: str) -> None:
-        (self._auto if mode == "auto" else self._gri).setChecked(True)
+        self._mode = mode
+        self._anim.stop()
+        self._anim.setStartValue(self._knob)
+        self._anim.setEndValue(0.0 if mode == "auto" else 1.0)
+        self._anim.start()
+
+    def _select(self, mode: str) -> None:
+        if mode != self._mode:
+            self.set_mode(mode)
+            self.mode_changed.emit(mode)
+
+    def _on_anim(self, value) -> None:
+        self._knob = float(value)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._select(
+                "auto" if event.position().x() < self._half else "grimoire")
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return):
+            self._select("grimoire" if self._mode == "auto" else "auto")
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        radius = r.height() / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#2a2a36"))
+        p.drawRoundedRect(r, radius, radius)
+        knob = QRectF(self._knob * self._half, 0, self._half, r.height())
+        p.setBrush(QColor("#5b3fa6"))
+        p.drawRoundedRect(knob.adjusted(2, 2, -2, -2), radius - 2, radius - 2)
+        active = 0 if self._mode == "auto" else 1
+        f = p.font()
+        for i, text in enumerate(self._LABELS):
+            seg = QRectF(i * self._half, 0, self._half, r.height())
+            f.setBold(i == active)
+            p.setFont(f)
+            p.setPen(QColor("#ffffff") if i == active else QColor("#cfcfd6"))
+            p.drawText(seg, Qt.AlignmentFlag.AlignCenter, text)
 
 
 class MonsterPanel(QWidget):
@@ -310,6 +376,7 @@ class MonsterPanel(QWidget):
         self.current: Optional[str] = None
         self._loaded_url: Optional[str] = None
         self._imported: Dict = imported_data or {}
+        self._grimoire_visible = False   # grimoire view pinned on top of the stack
 
         self.setStyleSheet("QWidget { background:#15151b; color:#e8e8ec; }")
         outer = QVBoxLayout(self)
@@ -336,10 +403,7 @@ class MonsterPanel(QWidget):
         self._stack.addWidget(self._card_group)
 
         if _HAVE_WEBENGINE:
-            self._profile = QWebEngineProfile(_GRIMOIRE_PROFILE_NAME)
-            self._profile.setPersistentCookiesPolicy(
-                QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies
-            )
+            self._profile = shared_grimoire_profile()
             # index 1 — Grimoire notes (unchanged)
             notes = notes_url or GRIMOIRE_URL
             self._grimoire_web = self._make_view(persistent=True,
@@ -403,10 +467,11 @@ class MonsterPanel(QWidget):
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------
     def set_grimoire_visible(self, visible: bool) -> None:
+        self._grimoire_visible = visible
         if visible:
             self._stack.setCurrentIndex(1)   # grimoire notes
         else:
-            self._stack.setCurrentIndex(0)   # local cards (or fallback)
+            self._show_monster_view()
 
     def set_countdown(self, seconds: Optional[int]) -> None:
         if seconds is None:
@@ -424,7 +489,9 @@ class MonsterPanel(QWidget):
     # -- local card display ----------------------------------------------
     def show_monsters(self, names: List[str]) -> None:
         """Show detected monsters. Uses local cards if imported data exists,
-        otherwise falls back to the web view."""
+        otherwise falls back to the web view. While the Grimoire view is
+        pinned (set_grimoire_visible(True)), content still updates in the
+        background but the visible view is not switched."""
         self.current = names[0] if names else None
 
         # Always update the card group (shows placeholder card if no import)
@@ -437,6 +504,13 @@ class MonsterPanel(QWidget):
             if url != self._loaded_url:
                 self._loaded_url = url
                 self.web.setUrl(QUrl(url)) if url else self.web.setHtml(_BLANK_HTML)
+        if not self._grimoire_visible:
+            self._show_monster_view()
+
+    def _show_monster_view(self) -> None:
+        """Pick the non-grimoire view: web fallback when there is no imported
+        data but a monster is detected, local cards otherwise."""
+        if not self._imported and self.current and self.web is not None:
             self._stack.setCurrentIndex(2)
         else:
             self._stack.setCurrentIndex(0)
