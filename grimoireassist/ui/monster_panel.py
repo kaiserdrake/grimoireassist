@@ -269,50 +269,52 @@ class MonsterNav(QWidget):
             self._buttons.append(btn)
 
 
-class ViewModeSwitch(QWidget):
-    """Sliding two-position toggle: 'Auto Switch' vs 'Grimoire'.
+class AutoSwitchToggle(QWidget):
+    """Sliding ON/OFF toggle for the Auto Switch behavior.
 
-    Auto Switch follows detections (tracking view while monsters are seen,
-    Grimoire after the idle timeout); Grimoire pins the Grimoire view
-    regardless of detections. A highlight slides behind the active label."""
+    When ON, the main window follows OCR detections (tracking view while
+    monsters are seen, Grimoire after the idle timeout). When OFF, the view
+    only changes when the user picks it by hand. This is independent from the
+    manual Grimoire view button — showing the Grimoire never flips this toggle.
+    A highlight slides behind the active state."""
 
-    mode_changed = pyqtSignal(str)  # "auto" | "grimoire"
+    toggled = pyqtSignal(bool)  # True = Auto Switch on
 
-    _LABELS = ("Auto Switch", "Grimoire")
+    _LABELS = ("Auto On", "Auto Off")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._mode = "auto"
-        self._knob = 0.0   # highlight position: 0 = Auto Switch, 1 = Grimoire
+        self._on = True
+        self._knob = 0.0   # highlight position: 0 = On (left), 1 = Off (right)
         self._anim = QVariantAnimation(self, duration=140)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_anim)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setToolTip("Auto Switch: follow OCR detections to the tracking view")
         f = self.font()
         f.setPixelSize(12)
         self.setFont(f)
-        fm = self.fontMetrics()
         # each half fits the widest label (bold, so the active state doesn't clip)
         f.setBold(True)
         self._half = max(QFontMetrics(f).horizontalAdvance(t)
                          for t in self._LABELS) + 24
         self.setFixedSize(self._half * 2, 24)
 
-    def mode(self) -> str:
-        return self._mode
+    def is_on(self) -> bool:
+        return self._on
 
-    def set_mode(self, mode: str) -> None:
-        self._mode = mode
+    def set_on(self, on: bool) -> None:
+        self._on = bool(on)
         self._anim.stop()
         self._anim.setStartValue(self._knob)
-        self._anim.setEndValue(0.0 if mode == "auto" else 1.0)
+        self._anim.setEndValue(0.0 if self._on else 1.0)
         self._anim.start()
 
-    def _select(self, mode: str) -> None:
-        if mode != self._mode:
-            self.set_mode(mode)
-            self.mode_changed.emit(mode)
+    def _select(self, on: bool) -> None:
+        if on != self._on:
+            self.set_on(on)
+            self.toggled.emit(self._on)
 
     def _on_anim(self, value) -> None:
         self._knob = float(value)
@@ -320,12 +322,11 @@ class ViewModeSwitch(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._select(
-                "auto" if event.position().x() < self._half else "grimoire")
+            self._select(event.position().x() < self._half)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return):
-            self._select("grimoire" if self._mode == "auto" else "auto")
+            self._select(not self._on)
         else:
             super().keyPressEvent(event)
 
@@ -338,9 +339,10 @@ class ViewModeSwitch(QWidget):
         p.setBrush(QColor("#2a2a36"))
         p.drawRoundedRect(r, radius, radius)
         knob = QRectF(self._knob * self._half, 0, self._half, r.height())
-        p.setBrush(QColor("#5b3fa6"))
+        # green highlight when on, muted grey when off
+        p.setBrush(QColor("#3f9a54") if self._on else QColor("#4a4a57"))
         p.drawRoundedRect(knob.adjusted(2, 2, -2, -2), radius - 2, radius - 2)
-        active = 0 if self._mode == "auto" else 1
+        active = 0 if self._on else 1
         f = p.font()
         for i, text in enumerate(self._LABELS):
             seg = QRectF(i * self._half, 0, self._half, r.height())

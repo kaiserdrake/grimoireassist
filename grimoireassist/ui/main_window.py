@@ -31,11 +31,11 @@ from ..hotkey import GlobalHotkey
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..virtualcam import VirtualCamSink
-from .browser import BrowserPanel
+from .browser import BrowserPanel, SEARCH_ENGINES
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
-from .monster_panel import MonsterNav, MonsterPanel, ViewModeSwitch
+from .monster_panel import MonsterNav, MonsterPanel, AutoSwitchToggle
 
 
 class MainWindow(QMainWindow):
@@ -58,7 +58,8 @@ class MainWindow(QMainWindow):
         self.worker: Optional[OcrWorker] = None
         self.panel: Optional[MonsterPanel] = None
         self.game: Optional[GameInfo] = None
-        self._auto_switch = True            # Auto Switch vs Grimoire-locked
+        self._auto_switch = True            # follow OCR detections to tracking view
+        self._grimoire_shown = False        # is the Grimoire view currently on top
         self._detections: list = []         # latest [(name, confidence)]
         self._tracking_active = False       # OCR worker only runs when user starts it
 
@@ -77,7 +78,7 @@ class MainWindow(QMainWindow):
         _host_lay = QVBoxLayout(self._main_host)
         _host_lay.setContentsMargins(0, 0, 0, 0)
         _host_lay.setSpacing(0)
-        self.browser = BrowserPanel()
+        self.browser = BrowserPanel(cfg=cfg)
         self.browser.setVisible(False)   # drawer starts closed
         self.browser.status_message.connect(
             lambda msg: self.statusBar().showMessage(msg, 4000))
@@ -387,6 +388,20 @@ class MainWindow(QMainWindow):
         self.menu.addAction("Switch game…", self._switch_game)
         self.menu.addAction("Import monster data…", self._open_import_wizard)
 
+        # ── Browser ──────────────────────────────────────────────
+        self.menu.addSection("Browser")
+        engine_menu = self.menu.addMenu("Search engine")
+        engine_group = QActionGroup(engine_menu)
+        engine_group.setExclusive(True)
+        current_engine = getattr(self.cfg.ui, "search_engine", "google")
+        for key, (label, _tmpl) in SEARCH_ENGINES.items():
+            act = QAction(label, engine_menu)
+            act.setCheckable(True)
+            act.setChecked(current_engine == key)
+            act.triggered.connect(lambda _c, k=key: self.browser.set_search_engine(k))
+            engine_group.addAction(act)
+            engine_menu.addAction(act)
+
         # ── Window ───────────────────────────────────────────────
         self.menu.addSection("Window")
         self.act_on_top = self.menu.addAction("Always on top")
@@ -434,11 +449,22 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.tracking_btn)
         tb.addSeparator()
 
-        # View-mode switch: Auto Switch (auto transition) vs Grimoire (locked).
-        self.view_switch = ViewModeSwitch()
-        self.view_switch.set_mode("auto" if self._auto_switch else "grimoire")
-        self.view_switch.mode_changed.connect(self._on_view_mode)
-        tb.addWidget(self.view_switch)
+        # Auto Switch toggle: when on, OCR detections switch to the tracking view.
+        self.auto_switch_toggle = AutoSwitchToggle()
+        self.auto_switch_toggle.set_on(self._auto_switch)
+        self.auto_switch_toggle.toggled.connect(self._on_auto_switch_toggled)
+        tb.addWidget(self.auto_switch_toggle)
+        tb.addSeparator()
+
+        # Manual Grimoire view toggle — independent of Auto Switch; showing the
+        # Grimoire never changes the Auto Switch state.
+        self.grimoire_btn = QToolButton()
+        self.grimoire_btn.setCheckable(True)
+        self.grimoire_btn.setStyleSheet(
+            "QToolButton { font-size:15px; padding:2px 8px; }")
+        self.grimoire_btn.clicked.connect(self._toggle_grimoire_view)
+        self._update_grimoire_btn()
+        tb.addWidget(self.grimoire_btn)
         tb.addSeparator()
 
         # Browser drawer toggle.
@@ -794,20 +820,24 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(flags)
         self.show()
 
-    # ================= view mode (auto-switch vs grimoire) =================
-    def _on_view_mode(self, mode: str) -> None:
-        self._auto_switch = (mode == "auto")
-        if mode == "grimoire":
-            # lock to the Grimoire view; no auto transitions
-            self._cancel_idle()
-            self._set_grimoire(True)
-        else:
-            # auto: re-evaluate the view from the current detections
+    # ================= view mode (auto switch + manual grimoire) =================
+    def _on_auto_switch_toggled(self, on: bool) -> None:
+        self._auto_switch = on
+        if on:
+            # Re-evaluate the view from the current detections.
             if self._detections:
                 self._cancel_idle()
                 self._set_grimoire(False)
             else:
                 self._start_idle()
+        else:
+            # Manual mode: stop any pending auto-revert and leave the view as-is.
+            self._cancel_idle()
+
+    def _toggle_grimoire_view(self) -> None:
+        """Manually show/hide the Grimoire view. Independent of Auto Switch."""
+        self._cancel_idle()
+        self._set_grimoire(not self._grimoire_shown)
 
     def _set_min_confidence(self, level: str) -> None:
         self.cfg.ocr.min_confidence_level = level
@@ -939,8 +969,23 @@ class MainWindow(QMainWindow):
             self.panel.set_countdown(remaining)
 
     def _set_grimoire(self, visible: bool) -> None:
+        self._grimoire_shown = visible
         if self.panel:
             self.panel.set_grimoire_visible(visible)
+        self._update_grimoire_btn()
+
+    def _update_grimoire_btn(self) -> None:
+        """Reflect the current view in the manual view button: the icon shows
+        where you are, the tooltip says where a click takes you."""
+        if not hasattr(self, "grimoire_btn"):
+            return
+        self.grimoire_btn.setChecked(self._grimoire_shown)
+        if self._grimoire_shown:
+            self.grimoire_btn.setText("📖")
+            self.grimoire_btn.setToolTip("Grimoire view — click for Tracking view")
+        else:
+            self.grimoire_btn.setText("🎯")
+            self.grimoire_btn.setToolTip("Tracking view — click for Grimoire view")
 
     # ================= calibration =================
     def _open_calibration(self) -> None:

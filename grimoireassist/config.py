@@ -97,6 +97,7 @@ class UiConfig:
     auto_start_tracking: bool = False   # start OCR tracking as soon as the app opens
     snapshot_hotkey: str = "ctrl+alt+s"  # system-wide hotkey that saves a frame snapshot
     browser_split_ratio: float = 0.5    # main-pane share of the splitter when the browser is open
+    search_engine: str = "google"       # default engine for non-address browser queries
 
 
 @dataclass
@@ -274,6 +275,7 @@ class Config:
                 auto_start_tracking=bool(ui.get("auto_start_tracking", False)),
                 snapshot_hotkey=str(ui.get("snapshot_hotkey", "ctrl+alt+s")),
                 browser_split_ratio=float(ui.get("browser_split_ratio", 0.5)),
+                search_engine=str(ui.get("search_engine", "google")),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -340,6 +342,7 @@ class Config:
                 "auto_start_tracking": self.ui.auto_start_tracking,
                 "snapshot_hotkey": self.ui.snapshot_hotkey,
                 "browser_split_ratio": self.ui.browser_split_ratio,
+                "search_engine": self.ui.search_engine,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

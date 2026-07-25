@@ -21,6 +21,7 @@ from __future__ import annotations
 import html
 import re
 import threading
+import urllib.parse
 import urllib.request
 from typing import List, Optional, Tuple
 
@@ -41,6 +42,57 @@ except Exception:  # pragma: no cover - WebEngine missing
 from .monster_panel import _inject_clipboard_fix
 
 _BROWSER_PROFILE_NAME = "browser_persistent"
+
+# Default search engines. Each template takes the URL-encoded query.
+SEARCH_ENGINES: dict[str, Tuple[str, str]] = {
+    # key: (display name, query-URL template)
+    "google": ("Google", "https://www.google.com/search?q={}"),
+    "bing": ("Bing", "https://www.bing.com/search?q={}"),
+    "duckduckgo": ("DuckDuckGo", "https://duckduckgo.com/?q={}"),
+}
+_DEFAULT_SEARCH_ENGINE = "google"
+
+
+# ── address vs. search ─────────────────────────────────────────────────────────
+
+# Scheme prefix like "http://", "file://", "about:", "mailto:".
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+def looks_like_url(text: str) -> bool:
+    """Heuristic: is `text` an address to navigate to, or a search query?
+
+    Treated as a URL: anything with an explicit scheme (``http://``,
+    ``about:``…), ``localhost``, an IPv4 address, or a single whitespace-free
+    token whose first path segment contains a dotted domain. Everything with a
+    space, or a lone word with no dot, is treated as a search query."""
+    text = text.strip()
+    if not text:
+        return False
+    # Explicit scheme (http://, https://, file://, about:blank, mailto:, …).
+    if _SCHEME_RE.match(text):
+        return True
+    # Any whitespace means it can't be a bare address → search.
+    if any(c.isspace() for c in text):
+        return False
+    host = text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    hostname = host.rsplit(":", 1)[0] if ":" in host else host
+    if hostname in ("localhost", "127.0.0.1"):
+        return True
+    # IPv4 dotted quad.
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", hostname):
+        return True
+    # Dotted domain: a dot with non-empty labels on both sides (e.g. example.com).
+    if "." in hostname and not hostname.startswith(".") and not hostname.endswith("."):
+        return True
+    return False
+
+
+def build_search_url(query: str, engine: str) -> str:
+    """Return the search-results URL for `query` on the named engine."""
+    _name, template = SEARCH_ENGINES.get(
+        engine, SEARCH_ENGINES[_DEFAULT_SEARCH_ENGINE])
+    return template.format(urllib.parse.quote_plus(query))
 
 
 # ── bookmarks markdown ─────────────────────────────────────────────────────────
@@ -123,8 +175,9 @@ class BrowserPanel(QWidget):
     # UI thread via the queued connection Qt uses for cross-thread signals.
     _bookmarks_fetched = pyqtSignal(int, list, str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, cfg=None) -> None:
         super().__init__(parent)
+        self._cfg = cfg
         self._profile = None
         self._bookmarks: List[Tuple[str, str]] = []
         self._bookmarks_url: str = ""
@@ -178,7 +231,7 @@ class BrowserPanel(QWidget):
         self._reload_btn = _btn("⟳", "Reload", self._reload)
 
         self._url_bar = QLineEdit()
-        self._url_bar.setPlaceholderText("Enter address…")
+        self._url_bar.setPlaceholderText("Search or enter address…")
         self._url_bar.setClearButtonEnabled(True)
         self._url_bar.returnPressed.connect(self._navigate)
         nav.addWidget(self._url_bar, 1)
@@ -229,6 +282,14 @@ class BrowserPanel(QWidget):
             self._profile = QWebEngineProfile(_BROWSER_PROFILE_NAME, self)
             self._profile.setPersistentCookiesPolicy(
                 QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+            # Google (and some other sites) serve an "unsupported browser"
+            # captcha wall when the User-Agent advertises "QtWebEngine". The
+            # underlying engine *is* Chromium, so dropping that token leaves an
+            # honest, plain-Chrome UA that passes without a captcha.
+            ua = self._profile.httpUserAgent()
+            clean = re.sub(r"\s*QtWebEngine/\S+", "", ua).strip()
+            if clean and clean != ua:
+                self._profile.setHttpUserAgent(clean)
 
     # ── tabs ────────────────────────────────────────────────────────────
     def new_tab(self, url: Optional[str] = None, focus: bool = True,
@@ -340,8 +401,31 @@ class BrowserPanel(QWidget):
         view = self.current_view()
         if not text or view is None:
             return
-        view.setUrl(QUrl.fromUserInput(text))
+        if looks_like_url(text):
+            view.setUrl(QUrl.fromUserInput(text))
+        else:
+            view.setUrl(QUrl(build_search_url(text, self._search_engine())))
         view.setFocus()
+
+    def _search_engine(self) -> str:
+        """The configured default search engine key (falls back to google)."""
+        engine = _DEFAULT_SEARCH_ENGINE
+        if self._cfg is not None:
+            engine = getattr(self._cfg.ui, "search_engine", engine)
+        return engine if engine in SEARCH_ENGINES else _DEFAULT_SEARCH_ENGINE
+
+    def set_search_engine(self, engine: str) -> None:
+        """Persist the default search engine used for address-bar queries."""
+        if engine not in SEARCH_ENGINES:
+            return
+        if self._cfg is not None:
+            self._cfg.ui.search_engine = engine
+            try:
+                self._cfg.save()
+            except Exception:
+                pass
+        name = SEARCH_ENGINES[engine][0]
+        self.status_message.emit(f"Search engine set to {name}")
 
     def _go_back(self) -> None:
         if self.current_view() is not None:
