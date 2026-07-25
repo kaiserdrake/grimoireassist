@@ -17,9 +17,28 @@ cd /d "%~dp0"
 set "VENV=.venv-build"
 set "PY=%VENV%\Scripts\python.exe"
 
+REM Optional version argument: `build.bat 1.2.3` stamps __version__ into
+REM grimoireassist\__init__.py (the single source of truth) before building, so
+REM the exe and the archive name both carry that version. With no argument the
+REM current __version__ is used unchanged. The bump is NOT auto-committed -
+REM commit it yourself before releasing.
+set "NEWVER=%~1"
+if defined NEWVER (
+    echo %NEWVER%|findstr /r "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul || (
+        echo [build] Invalid version "%NEWVER%" - expected X.Y.Z, e.g. 1.0.2
+        exit /b 1
+    )
+)
+
 if not exist "%PY%" (
     echo [build] Creating build venv...
     py -3.12 -m venv %VENV% || python -m venv %VENV%
+)
+
+if defined NEWVER (
+    echo [build] Stamping __version__ = %NEWVER% into grimoireassist\__init__.py ...
+    "%PY%" -c "import re,sys; f='grimoireassist/__init__.py'; s=open(f,encoding='utf-8-sig').read(); q=chr(34); n,c=re.subn('(?m)^__version__ = .*$', '__version__ = '+q+'%NEWVER%'+q, s); open(f,'w',encoding='utf-8').write(n) if c else sys.exit('[build] __version__ line not found in '+f)" || goto :fail
+    echo [build] Version set. Remember to commit the bump before release.bat.
 )
 
 echo [build] Installing dependencies...

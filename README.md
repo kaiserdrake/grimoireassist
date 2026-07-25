@@ -76,8 +76,13 @@ unpacked).
 ### Building a release
 
 ```bat
-build.bat
+build.bat 1.0.2
 ```
+
+The optional version argument stamps `__version__` into `grimoireassist/__init__.py` (the single
+source of truth) before building — that's how you set the version. Run `build.bat` with no argument
+to build at the current `__version__` unchanged. The bump is **not** auto-committed; commit it
+yourself.
 
 That's the whole build: it creates a clean `.venv-build` (first run only), installs CUDA torch +
 `requirements.txt` + PyInstaller, runs PyInstaller with `GrimoireAssist.spec`, and packs the
@@ -94,13 +99,16 @@ result (7z/LZMA2 — a plain zip would exceed GitHub's 2 GiB release-asset limit
 One-time setup: authenticate the [GitHub CLI](https://cli.github.com/) with `gh auth login`.
 
 1. Change the code, run `pytest`, commit and push.
-2. Bump `__version__` in `grimoireassist/__init__.py` (shown in the title bar and `--version`);
-   commit and push.
-3. `build.bat` → smoke test → `release.bat`.
+2. `build.bat <version>` (e.g. `build.bat 1.0.2`) — stamps and builds. Commit the version bump
+   and push.
+3. Smoke-test the exe, then `release.bat`.
 
-`release.bat` reads the version from the package, refuses to overwrite an existing release, tags
-the commit (`v<version>`), pushes the tag, and publishes a GitHub release with the `.7z` attached
-(`gh release create --generate-notes`).
+`release.bat` publishes the **newest** `dist\GrimoireAssist-v*-win64.7z` and derives the tag from
+that archive's filename — it does not rebuild, so an already-built archive is released as-is. It
+refuses to overwrite an existing release, tags the commit (`v<version>`), pushes the tag, and
+publishes a GitHub release with the `.7z` attached (`gh release create --generate-notes`). Because
+the version comes from the archive, always `build.bat <version>` before releasing so source and
+artifact stay in step.
 
 **User update flow:** extract the new archive *next to* the old folder (not over it), copy
 `config.yaml` and the `games/` folder across (calibrated regions + imported monster data), delete
