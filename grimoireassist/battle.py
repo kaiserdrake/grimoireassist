@@ -286,6 +286,9 @@ try:
         monsters_changed = pyqtSignal(list)
         monster_killed = pyqtSignal(str)
         debug_text = pyqtSignal(str, list)  # status_text, monster_texts
+        # [(x, y, w, h, matched)] in frame coords: every configured region with
+        # matched=False (outline), plus a matched=True box per recognised text.
+        region_status = pyqtSignal(list)
         error = pyqtSignal(str)
 
         def __init__(self, cfg: Config, frame_buffer, engine: OcrEngine, parent=None):
@@ -299,6 +302,10 @@ try:
             self._end_sig = None    # last Battle-End region fingerprint
             self._end_ocr_t = 0.0
             self._end_cached = False
+            self._match_boxes: list = []   # frame-coord (x, y, w, h) of matched text
+            self._end_boxes: list = []     # frame-coord boxes of the end keyword
+            self._last_status: Optional[list] = None  # last emitted region_status payload
+            self._end_text_logged = ""     # last battle-end text written to the debug log
             self.tracker = MonsterTracker(
                 persist_seconds=cfg.effective_monster_persist_s(),
                 end_persist_seconds=cfg.effective_monster_persist_end_s(),
@@ -360,9 +367,24 @@ try:
             changed = (self._end_sig is None or self._end_sig.shape != sig.shape
                        or float(np.abs(sig - self._end_sig).mean()) >= self._CHANGE_THRESHOLD)
             if changed or (now - self._end_ocr_t) >= self._HEARTBEAT_S:
-                text = self.engine.read_text(crop)
+                lines = self.engine.read_lines(crop)
                 needles = [_norm(k) for k in self.cfg.ocr.keywords_battle_end]
+                # Detection uses the concatenated text (same semantics as the
+                # old read_text path); the per-line boxes feed the overlay.
+                text = " ".join(t for t, _c, _b in lines)
                 self._end_cached = _contains_any(text, needles)
+                self._end_boxes = [
+                    (region.x + b[0], region.y + b[1], b[2], b[3])
+                    for t, _c, b in lines
+                    if b is not None and _contains_any(t, needles)]
+                # Log end-region reads too, but only when the text changes —
+                # the 1s heartbeat would otherwise repeat the same line.
+                if text and text != self._end_text_logged:
+                    self._end_text_logged = text
+                    flag = "  →  END detected" if self._end_cached else ""
+                    self.debug_text.emit(f"[end region] {text}{flag}", [])
+                elif not text:
+                    self._end_text_logged = ""
                 self._end_sig = sig
                 self._end_ocr_t = now
             return self._end_cached
@@ -389,19 +411,30 @@ try:
                         if warn:
                             self.error.emit(f"⚠ {warn}")
                             self.engine.gpu_warning = None
-                        raw_lines: list = []  # [(text, conf)]
-                        for region in self.cfg.ocr.regions_monster_names:
-                            crop = self._crop(frame, region)
-                            if crop is not None:
-                                raw_lines.extend(self.engine.read_lines(crop))
-                        # match to real monsters and filter by the min confidence level
+                        # Per region: read lines and match; remember where each
+                        # matched line sits (drives the preview overlay boxes).
                         floor = level_floor(self.cfg.ocr.min_confidence_level)
                         cutoff = self.cfg.ocr.match_cutoff
+                        raw_lines: list = []  # [(text, conf, box)]
                         dets = []  # [(name, conf)]
-                        for text, conf in raw_lines:
-                            name = match_known(text, self.cfg.monster_name_list, cutoff=cutoff)
-                            if name and conf >= floor:
-                                dets.append((name, conf))
+                        self._match_boxes = []
+                        for region in self.cfg.ocr.regions_monster_names:
+                            crop = self._crop(frame, region)
+                            if crop is None:
+                                continue
+                            lines = self.engine.read_lines(crop)
+                            raw_lines.extend(lines)
+                            for text, conf, box in lines:
+                                name = match_known(text, self.cfg.monster_name_list, cutoff=cutoff)
+                                if name and conf >= floor:
+                                    dets.append((name, conf))
+                                    if box is not None:
+                                        bx, by, bw, bh = box
+                                        self._match_boxes.append(
+                                            (region.x + bx, region.y + by, bw, bh))
+                                    else:  # engine without geometry: whole region
+                                        self._match_boxes.append(
+                                            (region.x, region.y, region.w, region.h))
                         self._last_sig = sig
                         self._last_ocr_t = t0
                         self.tracker.observe(dets, t0)
@@ -409,7 +442,7 @@ try:
                         # region (no raw + no match) would otherwise flood the log.
                         if raw_lines:
                             raw_str = "  |  ".join(
-                                f"{t} ({c:.0%})" for t, c in raw_lines
+                                f"{t} ({c:.0%})" for t, c, _b in raw_lines
                             )
                             self.debug_text.emit(raw_str, [n for n, _ in dets])
                     else:
@@ -418,6 +451,26 @@ try:
                     end_detected = self._detect_end(frame, t0)
                     self.tracker.expire(t0, end_detected)
                     self.tracker.emit_if_changed()
+                    # Region overlay for the input preview; emit only on change.
+                    # All configured regions as outlines + a box per matched text.
+                    status = [(r.x, r.y, r.w, r.h, False)
+                              for r in self.cfg.ocr.regions_monster_names
+                              if r.is_set()]
+                    end_region = self.cfg.ocr.regions_battle_end
+                    if end_region.is_set():
+                        # Whole-region green only when detected without any
+                        # per-line geometry (engine fallback).
+                        status.append((end_region.x, end_region.y,
+                                       end_region.w, end_region.h,
+                                       end_detected and not self._end_boxes))
+                        if end_detected:
+                            status.extend((x, y, w, h, True)
+                                          for x, y, w, h in self._end_boxes)
+                    status.extend((x, y, w, h, True)
+                                  for x, y, w, h in self._match_boxes)
+                    if status != self._last_status:
+                        self._last_status = status
+                        self.region_status.emit(status)
                 except Exception as exc:
                     import traceback
                     self.error.emit(

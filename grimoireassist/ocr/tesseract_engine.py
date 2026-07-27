@@ -6,7 +6,7 @@ from typing import List
 
 import numpy as np
 
-from .engine import OcrEngine, preprocess
+from .engine import OcrEngine, preprocess, preprocess_scale
 
 
 class TesseractEngine(OcrEngine):
@@ -38,7 +38,8 @@ class TesseractEngine(OcrEngine):
         ).strip()
 
     def read_lines(self, image: np.ndarray) -> list:
-        """Return [(text, confidence), ...] using Tesseract's per-word data."""
+        """Return [(text, confidence, (x, y, w, h))] using Tesseract's
+        per-word data; boxes are in crop coordinates."""
         if image is None or image.size == 0:
             return []
         data = self._run(
@@ -49,19 +50,32 @@ class TesseractEngine(OcrEngine):
         )
         # Aggregate words into lines keyed by (block, par, line) and average confidence.
         from collections import defaultdict
-        lines: dict = defaultdict(lambda: {"words": [], "confs": []})
+        lines: dict = defaultdict(
+            lambda: {"words": [], "confs": [], "l": [], "t": [], "r": [], "b": []})
         for i, word in enumerate(data["text"]):
             word = (word or "").strip()
             conf = int(data["conf"][i])
             if not word or conf < 0:
                 continue
             key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
-            lines[key]["words"].append(word)
-            lines[key]["confs"].append(conf)
+            ln = lines[key]
+            ln["words"].append(word)
+            ln["confs"].append(conf)
+            ln["l"].append(data["left"][i])
+            ln["t"].append(data["top"][i])
+            ln["r"].append(data["left"][i] + data["width"][i])
+            ln["b"].append(data["top"][i] + data["height"][i])
+        # Word geometry is in preprocess()ed-image space; map back to the crop.
+        ih, iw = image.shape[:2]
+        s = preprocess_scale(iw, ih)
         out = []
         for line in lines.values():
             text = " ".join(line["words"])
             conf = sum(line["confs"]) / len(line["confs"]) / 100.0  # 0–1
             if text:
-                out.append((text, conf))
+                x, y = min(line["l"]), min(line["t"])
+                box = (round(x / s), round(y / s),
+                       round((max(line["r"]) - x) / s),
+                       round((max(line["b"]) - y) / s))
+                out.append((text, conf, box))
         return out

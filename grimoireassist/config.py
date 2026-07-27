@@ -98,6 +98,8 @@ class UiConfig:
     snapshot_hotkey: str = "ctrl+alt+s"  # system-wide hotkey that saves a frame snapshot
     browser_split_ratio: float = 0.5    # main-pane share of the splitter when the browser is open
     search_engine: str = "google"       # default engine for non-address browser queries
+    show_input_preview: bool = False    # live PiP of the raw capture frames over the tracking view
+    preview_fps: float = 5.0            # PiP refresh rate; low on purpose, it's a monitoring view
 
 
 @dataclass
@@ -276,6 +278,8 @@ class Config:
                 snapshot_hotkey=str(ui.get("snapshot_hotkey", "ctrl+alt+s")),
                 browser_split_ratio=float(ui.get("browser_split_ratio", 0.5)),
                 search_engine=str(ui.get("search_engine", "google")),
+                show_input_preview=bool(ui.get("show_input_preview", False)),
+                preview_fps=float(ui.get("preview_fps", 5.0)),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -322,7 +326,9 @@ class Config:
                 "width": self.capture.width,
                 "height": self.capture.height,
                 "fps": self.capture.fps,
-                **({"video_file": self.capture.video_file} if self.capture.video_file else {}),
+                # video_file is deliberately NOT saved: it's a testing override
+                # (--video / hand-edited yaml) and must never stick to a normal
+                # capture-card launch.
             },
             "virtual_camera": {"enabled": self.virtual_camera.enabled},
             "ocr": {
@@ -343,6 +349,8 @@ class Config:
                 "snapshot_hotkey": self.ui.snapshot_hotkey,
                 "browser_split_ratio": self.ui.browser_split_ratio,
                 "search_engine": self.ui.search_engine,
+                "show_input_preview": self.ui.show_input_preview,
+                "preview_fps": self.ui.preview_fps,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

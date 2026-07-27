@@ -36,6 +36,7 @@ from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
 from .monster_panel import MonsterNav, MonsterPanel, AutoSwitchToggle
+from .preview import InputPreview
 
 
 class MainWindow(QMainWindow):
@@ -95,6 +96,14 @@ class MainWindow(QMainWindow):
         self._splitter.setStyleSheet(
             "QSplitter::handle { background:#2a2a36; }")
         self.setCentralWidget(self._splitter)
+
+        # Live input-frame PiP: floats over the main pane's bottom-right corner,
+        # outside the layout. Its refresh timer only runs while it is visible.
+        self._preview = InputPreview(self.buffer, fps=cfg.ui.preview_fps,
+                                     parent=self._main_host)
+        self._preview.setVisible(False)
+        if cfg.ui.show_input_preview:
+            self.act_preview.setChecked(True)  # fires _toggle_preview
 
         # capture is global (one camera feeds every game)
         self._start_capture(cfg.capture.device_index)
@@ -206,6 +215,9 @@ class MainWindow(QMainWindow):
             if old is not None:
                 old.deleteLater()
         lay.addWidget(w)
+        # keep the PiP preview above the freshly swapped-in panel
+        if getattr(self, "_preview", None) is not None:
+            self._preview.raise_()
 
     # ================= browser drawer =================
     def _toggle_browser(self) -> None:
@@ -248,6 +260,7 @@ class MainWindow(QMainWindow):
         self.worker.battle_ended.connect(self._on_battle_ended)
         self.worker.error.connect(self._on_ocr_error)
         self.worker.debug_text.connect(self._on_debug_text)
+        self.worker.region_status.connect(self._preview.set_region_status)
         self.worker.start()
 
     def _stop_worker(self) -> None:
@@ -258,6 +271,17 @@ class MainWindow(QMainWindow):
         self._detections = []
         self.model = OverlayModel()
         self._refresh_panel()
+        self._push_idle_regions()
+
+    def _push_idle_regions(self) -> None:
+        """Show the configured OCR regions on the preview as dim outlines
+        (no matches) — the state whenever tracking isn't running."""
+        rects = [(r.x, r.y, r.w, r.h, False)
+                 for r in self.cfg.ocr.regions_monster_names if r.is_set()]
+        end = self.cfg.ocr.regions_battle_end
+        if end.is_set():
+            rects.append((end.x, end.y, end.w, end.h, False))
+        self._preview.set_region_status(rects)
 
     def _toggle_tracking(self) -> None:
         self._tracking_active = not self._tracking_active
@@ -411,6 +435,12 @@ class MainWindow(QMainWindow):
         self.act_fullscreen = self.menu.addAction("Fullscreen\tF11")
         self.act_fullscreen.setCheckable(True)
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
+        # Starts unchecked because the preview widget doesn't exist yet when the
+        # menu is built; __init__ re-checks it from config after creating it.
+        self.act_preview = self.menu.addAction("Input preview")
+        self.act_preview.setCheckable(True)
+        self.act_preview.setChecked(False)
+        self.act_preview.toggled.connect(self._toggle_preview)
 
         # ── Debug ────────────────────────────────────────────────
         self.menu.addSection("Debug")
@@ -725,6 +755,16 @@ class MainWindow(QMainWindow):
 
     def _toggle_debug(self, visible: bool) -> None:
         self._debug_widget.setVisible(visible)
+        # Keep the PiP preview clear of the debug panel (and its buttons).
+        self._preview.set_bottom_inset(
+            self._debug_widget.sizeHint().height() if visible else 0)
+
+    def _toggle_preview(self, visible: bool) -> None:
+        self._preview.setVisible(visible)
+        if visible:
+            self._preview.raise_()
+        self.cfg.ui.show_input_preview = visible
+        self.cfg.save()
 
     def _toggle_file_logging(self, enabled: bool) -> None:
         self.cfg.logging.to_file = enabled

@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .engine import OcrEngine, preprocess
+from .engine import OcrEngine, preprocess, preprocess_scale
 
 
 def _merge_adjacent_boxes(boxes: list) -> list:
@@ -16,8 +16,10 @@ def _merge_adjacent_boxes(boxes: list) -> list:
     on the same line (vertical centres within ~0.6 of text height) that are close
     horizontally (gap < ~1.5 of text height) are concatenated left-to-right into
     one string; the merged confidence is the mean of its parts. Returns
-    [(text, confidence), ...]. A wide horizontal gap starts a new entry, so
-    separated UI text or a different monster's name is never absorbed."""
+    [(text, confidence, (x, y, w, h)), ...] with the box covering all merged
+    parts, in the same coordinate space as the input. A wide horizontal gap
+    starts a new entry, so separated UI text or a different monster's name is
+    never absorbed."""
     if not boxes:
         return []
     # Order top-to-bottom, then left-to-right.
@@ -26,8 +28,18 @@ def _merge_adjacent_boxes(boxes: list) -> list:
     cur_text: list = []
     cur_confs: list = []
     cur_y = cur_right = cur_h = None
+    cur_left = cur_top = cur_bottom = None
+
+    def _flush():
+        if cur_text:
+            box = (round(cur_left), round(cur_top),
+                   round(cur_right - cur_left), round(cur_bottom - cur_top))
+            out.append((" ".join(cur_text), sum(cur_confs) / len(cur_confs), box))
+
     for b in boxes:
         h = b["height"] or 1.0
+        top = b["ycenter"] - h / 2.0
+        bottom = b["ycenter"] + h / 2.0
         same_line = (cur_y is not None
                      and abs(b["ycenter"] - cur_y) <= 0.6 * max(h, cur_h or h))
         adjacent = (cur_right is not None
@@ -38,13 +50,14 @@ def _merge_adjacent_boxes(boxes: list) -> list:
             cur_right = max(cur_right, b["right"])
             cur_y = (cur_y + b["ycenter"]) / 2.0
             cur_h = max(cur_h or h, h)
+            cur_top = min(cur_top, top)
+            cur_bottom = max(cur_bottom, bottom)
         else:
-            if cur_text:
-                out.append((" ".join(cur_text), sum(cur_confs) / len(cur_confs)))
+            _flush()
             cur_text, cur_confs = [b["text"]], [b["conf"]]
             cur_y, cur_right, cur_h = b["ycenter"], b["right"], h
-    if cur_text:
-        out.append((" ".join(cur_text), sum(cur_confs) / len(cur_confs)))
+            cur_left, cur_top, cur_bottom = b["left"], top, bottom
+    _flush()
     return out
 
 
@@ -137,4 +150,11 @@ class EasyOcrEngine(OcrEngine):
                 "ycenter": (min(ys) + max(ys)) / 2.0,
                 "height": max(ys) - min(ys),
             })
-        return _merge_adjacent_boxes(boxes)
+        merged = _merge_adjacent_boxes(boxes)
+        # Box coords are in preprocess()ed-image space; map back to the crop.
+        ih, iw = image.shape[:2]
+        s = preprocess_scale(iw, ih)
+        if s == 1.0:
+            return merged
+        return [(t, c, (round(x / s), round(y / s), round(w / s), round(h / s)))
+                for t, c, (x, y, w, h) in merged]

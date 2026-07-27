@@ -29,6 +29,19 @@ _MAX_SIDE = 1280
 _MIN_HEIGHT = 48
 
 
+def preprocess_scale(w: int, h: int) -> float:
+    """The resize factor preprocess() applies to a crop of this size.
+
+    Engines that report text boxes divide their coordinates by this to map
+    them back into crop space."""
+    scale = 1.0
+    if max(w, h) > _MAX_SIDE:
+        scale = _MAX_SIDE / max(w, h)
+    elif h < _MIN_HEIGHT:
+        scale = _MIN_HEIGHT / h
+    return scale if abs(scale - 1.0) > 0.05 else 1.0
+
+
 def preprocess(crop: np.ndarray, binarize: bool = True) -> np.ndarray:
     """Grayscale + size-normalise for OCR input.
 
@@ -42,12 +55,9 @@ def preprocess(crop: np.ndarray, binarize: bool = True) -> np.ndarray:
         return crop
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
     h, w = gray.shape[:2]
-    scale = 1.0
-    if max(w, h) > _MAX_SIDE:
-        scale = _MAX_SIDE / max(w, h)      # shrink only oversized regions
-    elif h < _MIN_HEIGHT:
-        scale = _MIN_HEIGHT / h            # enlarge tiny text
-    if abs(scale - 1.0) > 0.05:
+    # shrink only oversized regions; enlarge tiny text (see preprocess_scale)
+    scale = preprocess_scale(w, h)
+    if scale != 1.0:
         interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=interp)
     if not binarize:
@@ -89,13 +99,15 @@ class OcrEngine(ABC):
         raise NotImplementedError
 
     def read_lines(self, image: np.ndarray) -> List[tuple]:
-        """Return [(text, confidence), ...] — one entry per detected line.
+        """Return [(text, confidence, box), ...] — one entry per detected line.
+        `box` is (x, y, w, h) in the coordinates of the crop passed in, or
+        None when the engine has no geometry.
 
-        Default splits read_text on newlines (confidence 1.0); engines that can
-        return real per-detection confidence should override this.
+        Default splits read_text on newlines (confidence 1.0, no boxes);
+        engines that can return real per-detection data should override this.
         """
         text = self.read_text(image)
-        return [(ln.strip(), 1.0) for ln in text.splitlines() if ln.strip()]
+        return [(ln.strip(), 1.0, None) for ln in text.splitlines() if ln.strip()]
 
 
 def build_engine(name: str, languages: List[str], gpu: bool = False) -> OcrEngine:
