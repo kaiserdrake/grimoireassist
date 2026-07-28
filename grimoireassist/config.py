@@ -99,7 +99,9 @@ class UiConfig:
     browser_split_ratio: float = 0.5    # main-pane share of the splitter when the browser is open
     search_engine: str = "google"       # default engine for non-address browser queries
     show_input_preview: bool = False    # live PiP of the raw capture frames over the tracking view
-    preview_fps: float = 5.0            # PiP refresh rate; low on purpose, it's a monitoring view
+    preview_fps: float = 10.0           # PiP refresh rate; capped at 30 by the widget
+    preview_width: int = 240            # PiP width in px (height follows the frame aspect);
+                                        # set by dragging the preview's top-left grip
 
 
 @dataclass
@@ -279,7 +281,8 @@ class Config:
                 browser_split_ratio=float(ui.get("browser_split_ratio", 0.5)),
                 search_engine=str(ui.get("search_engine", "google")),
                 show_input_preview=bool(ui.get("show_input_preview", False)),
-                preview_fps=float(ui.get("preview_fps", 5.0)),
+                preview_fps=float(ui.get("preview_fps", 10.0)),
+                preview_width=int(ui.get("preview_width", 240)),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -351,6 +354,7 @@ class Config:
                 "search_engine": self.ui.search_engine,
                 "show_input_preview": self.ui.show_input_preview,
                 "preview_fps": self.ui.preview_fps,
+                "preview_width": self.ui.preview_width,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

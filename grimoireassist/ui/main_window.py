@@ -99,8 +99,11 @@ class MainWindow(QMainWindow):
 
         # Live input-frame PiP: floats over the main pane's bottom-right corner,
         # outside the layout. Its refresh timer only runs while it is visible.
+        # Drag its top-left grip to resize; the width is persisted to config.
         self._preview = InputPreview(self.buffer, fps=cfg.ui.preview_fps,
-                                     parent=self._main_host)
+                                     parent=self._main_host,
+                                     width=cfg.ui.preview_width)
+        self._preview.size_changed.connect(self._on_preview_resized)
         self._preview.setVisible(False)
         if cfg.ui.show_input_preview:
             self.act_preview.setChecked(True)  # fires _toggle_preview
@@ -764,6 +767,11 @@ class MainWindow(QMainWindow):
         if visible:
             self._preview.raise_()
         self.cfg.ui.show_input_preview = visible
+        self.cfg.save()
+
+    def _on_preview_resized(self, width: int) -> None:
+        """Persist a drag-resize of the PiP (emitted once, on mouse release)."""
+        self.cfg.ui.preview_width = int(width)
         self.cfg.save()
 
     def _toggle_file_logging(self, enabled: bool) -> None:
