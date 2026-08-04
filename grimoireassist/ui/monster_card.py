@@ -1,14 +1,28 @@
-"""Local monster info card — renders imported data without a web view."""
+"""Local monster info card — renders imported data without a web view.
+
+Cards fill the full height of the panel and are laid out in a single
+horizontal carousel: when more cards are detected than fit across the width,
+the strip scrolls sideways (arrow buttons, mouse wheel, or drag on the
+scrollbar). Card content is never stretched to fill the card — it stays
+top-aligned, with blank space below when a monster has little data, and the
+card body scrolls internally when it has more than the height can hold.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PyQt6.QtCore import (
+    QEasingCurve, QPointF, QPropertyAnimation, QRectF, QVariantAnimation, Qt,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
+)
 from PyQt6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QScroller, QScrollerProperties, QSizePolicy, QVBoxLayout,
+    QWidget,
 )
 
 # ── Palette ────────────────────────────────────────────────────────────────────
@@ -30,8 +44,9 @@ _DIM_FG      = "#6b6b75"
 _ICON_SIZE   = 34
 _PORTRAIT_H  = 150
 _COLS        = 4
-_CARD_MIN_H  = 420   # cards never shrink below this; blank space fills bottom
-_CARD_MIN_W  = 340   # narrowest a card column may get before a column is dropped
+_CARD_MIN_W  = 340   # narrowest a card slot may get before a column is dropped
+_ARROW_W     = 48    # width of the carousel's edge chevron zone
+_ARROW_H     = 112   # height of that zone (vertically centred)
 
 # Font sizes (px)
 _FS_NAME  = 18
@@ -39,6 +54,18 @@ _FS_SECT  = 14
 _FS_BODY  = 17
 _FS_TABLE = 20   # table cells read from a distance more than prose rows
 _FS_DIM   = 21
+
+
+# Slim scrollbars, so the in-card and carousel bars don't eat visual space.
+_SCROLLBAR_CSS = """
+QScrollBar:vertical { background:transparent; width:8px; margin:0; }
+QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
+QScrollBar::handle { background:#4a4a68; border-radius:4px; min-height:24px;
+                     min-width:24px; }
+QScrollBar::handle:hover { background:#5e5e84; }
+QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; }
+QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }
+"""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -107,9 +134,10 @@ class MonsterCard(QWidget):
                  image_base: Optional[Path], parent=None) -> None:
         super().__init__(parent)
         self._name = name
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # Cards take whatever height the carousel gives them; the body scrolls
+        # internally rather than the card growing past the viewport.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumWidth(200)
-        self.setMinimumHeight(_CARD_MIN_H)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         outer = QVBoxLayout(self)
@@ -181,8 +209,21 @@ class MonsterCard(QWidget):
         else:
             body_lay.addWidget(_val_label("No local data", _FS_DIM, _DIM_FG))
 
+        # Trailing stretch: content stays packed at the top and the leftover
+        # height is simply left blank — the rows are never spread to fill.
         body_lay.addStretch()
-        lay.addWidget(body)
+
+        body_scroll = QScrollArea(frame)
+        body_scroll.setWidget(body)
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body_scroll.viewport().setAutoFillBackground(False)
+        body_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+            + _SCROLLBAR_CSS)
+        lay.addWidget(body_scroll, 1)   # takes the card's leftover height
 
     # ── Section rendering ──────────────────────────────────────────────────────
 
@@ -339,10 +380,106 @@ class MonsterCard(QWidget):
 
 # ── Card group ─────────────────────────────────────────────────────────────────
 
+class _CarouselArea(QScrollArea):
+    """Horizontal strip: the wheel scrolls sideways (there is no vertical
+    scrolling here — cards are exactly viewport-height)."""
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class _EdgeChevron(QWidget):
+    """Bare chevron at the strip's edge — no frame, no fill, no button
+    chrome. It rests at a low opacity and, on hover, brightens and lays a
+    soft gradient scrim over the card behind it so the glyph stays legible."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, direction: int, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._dir = direction          # -1 = points left, +1 = points right
+        self._glow = 0.0               # 0 = resting, 1 = hovered
+        self.setFixedSize(_ARROW_W, _ARROW_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._anim = QVariantAnimation(self, duration=150)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_glow)
+
+    def _on_glow(self, value) -> None:
+        self._glow = float(value)
+        self.update()
+
+    def _animate_to(self, target: float) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._glow)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def enterEvent(self, event) -> None:
+        self._animate_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._animate_to(0.0)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Scrim: a soft vignette anchored to the outer edge, so the chevron
+        # never floats unreadably over bright artwork. Radial (not a banded
+        # rectangle) and sized to fade out well inside the widget, so there is
+        # no hard edge anywhere — nothing that reads as a button face.
+        radius = min(float(w), h / 2.0)
+        centre = QPointF(0.0 if self._dir < 0 else float(w), h / 2.0)
+        scrim = QRadialGradient(centre, radius)
+        alpha = 70 + 90 * self._glow
+        scrim.setColorAt(0.0, QColor(10, 10, 16, int(alpha)))
+        scrim.setColorAt(0.55, QColor(10, 10, 16, int(alpha * 0.45)))
+        scrim.setColorAt(1.0, QColor(10, 10, 16, 0))
+        p.fillRect(QRectF(0, 0, w, h), scrim)
+
+        # Chevron: two strokes, round caps/join, nudged toward its edge on hover.
+        p.setPen(QPen(QColor(255, 255, 255, int(150 + 105 * self._glow)), 2.4,
+                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                      Qt.PenJoinStyle.RoundJoin))
+        cx = w / 2 + self._dir * (2.0 + 2.0 * self._glow)
+        cy = h / 2
+        arm = 6.5
+        tip = QPointF(cx + self._dir * arm * 0.55, cy)
+        back = self._dir * -arm * 0.55
+        path = QPainterPath(QPointF(cx + back, cy - arm))
+        path.lineTo(tip)
+        path.lineTo(QPointF(cx + back, cy + arm))
+        p.drawPath(path)
+
+
 class MonsterCardGroup(QWidget):
-    """Card grid with responsive columns: `cols` is the maximum; columns are
-    dropped as the panel narrows (each card keeps ≥ _CARD_MIN_W), down to a
-    single full-width column where cards stack vertically."""
+    """Full-height card carousel.
+
+    Cards sit in one horizontal row, each as tall as the panel. `cols` is how
+    many are shown at once; the slot width shrinks with the panel and columns
+    are dropped once a slot would fall below _CARD_MIN_W. Any card past that
+    count stays in the strip and is reached by scrolling — the edge chevrons,
+    dragging the strip with the mouse, the wheel, or the scrollbar. The
+    chevrons wrap around: paging past the last card returns to the first.
+    """
 
     open_web = pyqtSignal(str)
 
@@ -352,79 +489,156 @@ class MonsterCardGroup(QWidget):
         self._cols = self._max_cols
         self.setStyleSheet(f"QWidget {{ background:{_GROUP_BG}; }}")
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            f"QScrollArea {{ background:{_GROUP_BG}; border:none; }}")
+        self._scroll = _CarouselArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet(
+            f"QScrollArea {{ background:{_GROUP_BG}; border:none; }}"
+            + _SCROLLBAR_CSS)
 
         self._container = QWidget()
         self._container.setStyleSheet(f"QWidget {{ background:{_GROUP_BG}; }}")
 
-        self._grid = QGridLayout(self._container)
-        self._grid.setContentsMargins(16, 12, 16, 12)
-        self._grid.setHorizontalSpacing(20)  # gap between card columns
-        self._grid.setVerticalSpacing(12)     # gap between card rows
-        self._apply_column_stretch()
+        self._row = QHBoxLayout(self._container)
+        self._row.setContentsMargins(16, 12, 16, 12)
+        self._row.setSpacing(20)   # gap between cards
+        # Trailing stretch keeps a short strip left-aligned instead of the
+        # cards spreading out to fill the width.
+        self._row.addStretch(1)
 
-        scroll.setWidget(self._container)
+        self._scroll.setWidget(self._container)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(scroll)
+        root.addWidget(self._scroll)
+
+        self._enable_drag_scroll()
+
+        self._bar = self._scroll.horizontalScrollBar()
+        self._anim = QPropertyAnimation(self._bar, b"value", self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._bar.valueChanged.connect(self._sync_arrows)
+        self._bar.rangeChanged.connect(lambda *_: self._sync_arrows())
+
+        self._prev_btn = self._make_arrow(-1)
+        self._next_btn = self._make_arrow(+1)
 
         self._cards: List[MonsterCard] = []
         self._image_base: Optional[Path] = None
+        self._sync_arrows()
+
+    def _enable_drag_scroll(self) -> None:
+        """Grab-and-drag panning (with flick momentum) anywhere on the strip.
+
+        QScroller is used rather than a hand-rolled event filter because it
+        also works when the press lands on a card's own child widgets, and it
+        still lets a click through when the pointer barely moved."""
+        viewport = self._scroll.viewport()
+        QScroller.grabGesture(
+            viewport, QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        scroller = QScroller.scroller(viewport)
+        props = scroller.scrollerProperties()
+        M = QScrollerProperties.ScrollMetric
+        off = QScrollerProperties.OvershootPolicy.OvershootAlwaysOff
+        props.setScrollMetric(M.VerticalOvershootPolicy, off)
+        props.setScrollMetric(M.HorizontalOvershootPolicy, off)
+        props.setScrollMetric(M.DragStartDistance, 0.004)  # ~4 mm before it pans
+        props.setScrollMetric(M.DecelerationFactor, 0.9)
+        scroller.setScrollerProperties(props)
+        viewport.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def set_image_base(self, path: Optional[Path]) -> None:
         self._image_base = path
 
-    # ── responsive columns ─────────────────────────────────────────────────────
-    def _effective_cols(self) -> int:
-        """Columns that fit at the current width, capped at the per-game max."""
-        m = self._grid.contentsMargins()
-        avail = self.width() - m.left() - m.right()
-        sp = self._grid.horizontalSpacing()
-        fit = (avail + sp) // (_CARD_MIN_W + sp)
-        return max(1, min(self._max_cols, fit))
+    # ── carousel controls ──────────────────────────────────────────────────────
+    def _make_arrow(self, direction: int) -> _EdgeChevron:
+        arrow = _EdgeChevron(direction, self)  # child of the group: floats over the strip
+        arrow.clicked.connect(lambda d=direction: self._scroll_by(d))
+        arrow.hide()
+        return arrow
 
-    def _apply_column_stretch(self) -> None:
-        # Stretch only the active columns; zero the rest so dropped columns
-        # from a previous layout don't keep claiming width.
-        for c in range(max(self._grid.columnCount(), self._max_cols)):
-            self._grid.setColumnStretch(c, 1 if c < self._cols else 0)
+    def _step(self) -> int:
+        """One card + gap: how far a single chevron click travels."""
+        return self._card_width() + self._row.spacing()
 
-    def _place_cards(self) -> None:
-        self._apply_column_stretch()
-        for i, card in enumerate(self._cards):
-            grid_row, grid_col = divmod(i, self._cols)
-            self._grid.addWidget(card, grid_row, grid_col, Qt.AlignmentFlag.AlignTop)
+    def _scroll_by(self, direction: int) -> None:
+        """Page one card along, wrapping around at either end."""
+        lo, hi = self._bar.minimum(), self._bar.maximum()
+        if hi <= lo:
+            return
+        value = self._bar.value()
+        at_edge = value >= hi if direction > 0 else value <= lo
+        if at_edge:
+            target = lo if direction > 0 else hi   # loop to the other end
+        else:
+            target = min(hi, max(lo, value + direction * self._step()))
+        # The wrap travels the whole strip, so give it a little longer.
+        self._anim.stop()
+        self._anim.setDuration(420 if at_edge else 220)
+        self._anim.setStartValue(value)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _sync_arrows(self) -> None:
+        """Both chevrons stay available whenever the strip is scrollable —
+        either one always leads somewhere, because the ends wrap."""
+        scrollable = self._bar.maximum() > self._bar.minimum()
+        for arrow in (self._prev_btn, self._next_btn):
+            arrow.setVisible(scrollable)
+            if scrollable:
+                arrow.raise_()
+
+    def _place_arrows(self) -> None:
+        y = max(0, (self.height() - _ARROW_H) // 2)
+        self._prev_btn.move(0, y)
+        self._next_btn.move(max(0, self.width() - _ARROW_W), y)
+
+    # ── responsive slot width ──────────────────────────────────────────────────
+    def _metrics(self) -> tuple:
+        """(columns, card width) for the current viewport: as many columns as
+        the per-game max allows while each card stays ≥ _CARD_MIN_W."""
+        m = self._row.contentsMargins()
+        sp = self._row.spacing()
+        avail = self._scroll.viewport().width() - m.left() - m.right()
+        if avail <= 0:
+            return 1, _CARD_MIN_W
+        cols = max(1, min(self._max_cols, (avail + sp) // (_CARD_MIN_W + sp)))
+        return cols, max(1, (avail - sp * (cols - 1)) // cols)
+
+    def _card_width(self) -> int:
+        return self._metrics()[1]
+
+    def _apply_widths(self) -> None:
+        self._cols, width = self._metrics()
+        for card in self._cards:
+            card.setFixedWidth(width)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        cols = self._effective_cols()
-        if cols != self._cols:
-            self._cols = cols
-            for card in self._cards:
-                self._grid.removeWidget(card)
-            self._place_cards()
+        self._apply_widths()
+        self._place_arrows()
+        self._sync_arrows()
 
     def show_monsters(self, names: List[str],
                       imported: Dict[str, dict]) -> None:
         for card in self._cards:
-            self._grid.removeWidget(card)
+            self._row.removeWidget(card)
             card.deleteLater()
         self._cards.clear()
 
-        self._cols = self._effective_cols()
         for name in names:
             sections = imported.get(name)
             card = MonsterCard(name, sections, self._image_base)
             card.open_web.connect(self.open_web)
+            # insert before the trailing stretch
+            self._row.insertWidget(self._row.count() - 1, card)
             self._cards.append(card)
-        self._place_cards()
+        self._apply_widths()
+        self._bar.setValue(0)
+        self._place_arrows()
+        self._sync_arrows()
 
     def clear(self) -> None:
         self.show_monsters([], {})

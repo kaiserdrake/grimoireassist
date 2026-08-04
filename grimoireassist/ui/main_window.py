@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+import re
 import threading
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
@@ -649,7 +650,8 @@ class MainWindow(QMainWindow):
         inject_lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
         ilay.addWidget(inject_lbl)
         self._ocr_input = QLineEdit()
-        self._ocr_input.setPlaceholderText("Type monster name to test matching…")
+        self._ocr_input.setPlaceholderText(
+            "Type monster name(s) to test matching — comma-separated for several…")
         self._ocr_input.setStyleSheet(
             "QLineEdit { background:#1a1a24; color:#c8ffc8; border:1px solid #2a2a36;"
             " border-radius:3px; padding:2px 6px; font-size:11px;"
@@ -711,23 +713,40 @@ class MainWindow(QMainWindow):
         return container
 
     def _inject_ocr(self) -> None:
-        """Feed the typed text through the OCR matching pipeline and show the result."""
+        """Feed the typed text through the OCR matching pipeline and show the result.
+
+        Several objects can be tested at once by separating them with commas,
+        semicolons or newlines ("anjanath, rathalos, azuros"); each term is
+        matched on its own and every hit is injected as one detection set, so
+        the multi-card view can be exercised without a live capture."""
         from ..battle import match_known
         raw = self._ocr_input.text().strip()
         if not raw:
             return
         known = self.cfg.monster_name_list
         cutoff = self.cfg.ocr.match_cutoff
-        matched = match_known(raw, known, cutoff=cutoff)
+        terms = [t.strip() for t in re.split(r"[,;\n]+", raw) if t.strip()]
         import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
+
+        matched: list = []   # (name, 1.0), deduped, in typed order
+        missed: list = []
+        for term in terms:
+            hit = match_known(term, known, cutoff=cutoff)
+            self._log_line(
+                f"[{ts}] inject:  raw={term!r}  →  "
+                + (f"matched={hit!r}" if hit else f"no match (cutoff={cutoff})"))
+            if hit is None:
+                missed.append(term)
+            elif hit not in [n for n, _ in matched]:
+                matched.append((hit, 1.0))
+
         if matched:
-            self._log_line(f"[{ts}] inject:  raw={raw!r}  →  matched={matched!r}")
-            self._on_monsters_changed([(matched, 1.0)])
-        else:
-            self._log_line(f"[{ts}] inject:  raw={raw!r}  →  no match (cutoff={cutoff})")
+            self._on_monsters_changed(matched)
+        if missed:
             self.statusBar().showMessage(
-                f"No match for {raw!r} (cutoff {cutoff})", 3000)
+                f"No match for {', '.join(repr(m) for m in missed)}"
+                f" (cutoff {cutoff})", 3000)
 
     def _clear_injected(self) -> None:
         """Remove injected monsters and return to the idle state."""
