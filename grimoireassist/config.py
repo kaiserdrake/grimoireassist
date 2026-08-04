@@ -101,7 +101,7 @@ class UiConfig:
     show_input_preview: bool = False    # live PiP of the raw capture frames over the tracking view
     preview_fps: float = 10.0           # PiP refresh rate; capped at 30 by the widget
     preview_width: int = 240            # PiP width in px (height follows the frame aspect);
-                                        # set by dragging the preview's top-left grip
+                                        # set by dragging the preview's top-right grip
 
 
 @dataclass

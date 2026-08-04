@@ -6,8 +6,8 @@ a hidden preview costs nothing.
 Optionally draws OCR results on top — translucent tints over the configured
 regions, green boxes hugging the text that matched.
 
-The widget is resizable by dragging its top-left grip (it's anchored to the
-bottom-right, so that corner is the free one). Only the width is a degree of
+The widget is resizable by dragging its top-right grip (it's anchored to the
+bottom-left, so that corner is the free one). Only the width is a degree of
 freedom — the height always follows the source frame's aspect ratio. The
 chosen width is reported via `size_changed` so the host can persist it.
 """
@@ -24,13 +24,13 @@ from ..capture import FrameBuffer
 
 DEFAULT_WIDTH = 240  # preview width; height follows the frame's aspect ratio
 MIN_WIDTH = 120      # below this the OCR overlay stops being readable
-_MARGIN = 12         # gap to the host's bottom-right corner
-_GRIP = 16           # size of the top-left resize handle, in px
+_MARGIN = 12         # gap to the host's bottom-left corner
+_GRIP = 16           # size of the top-right resize handle, in px
 
 
 class InputPreview(QWidget):
     """Small live view of the raw capture frames, floating over the parent's
-    bottom-right corner (outside its layout)."""
+    bottom-left corner (outside its layout)."""
 
     size_changed = pyqtSignal(int)  # new width, emitted when a drag-resize ends
 
@@ -156,14 +156,15 @@ class InputPreview(QWidget):
         self._paint_grip(p)
 
     def _paint_grip(self, p: QPainter) -> None:
-        """Three short diagonals in the top-left corner: the resize handle."""
+        """Three short diagonals in the top-right corner: the resize handle."""
         p.setPen(QPen(QColor(255, 255, 255, 110 if self._drag else 70), 1))
+        right = self.width() - 1
         for off in (5, 9, 13):
-            p.drawLine(2, off, off, 2)
+            p.drawLine(right - 2, off, right - off, 2)
 
     # ---- resizing ----------------------------------------------------------
     def _in_grip(self, pos) -> bool:
-        return pos.x() <= _GRIP and pos.y() <= _GRIP
+        return pos.x() >= self.width() - _GRIP and pos.y() <= _GRIP
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton and self._in_grip(ev.position()):
@@ -174,7 +175,7 @@ class InputPreview(QWidget):
 
     def mouseMoveEvent(self, ev) -> None:
         if self._drag is None:
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor
                            if self._in_grip(ev.position())
                            else Qt.CursorShape.ArrowCursor)
             super().mouseMoveEvent(ev)
@@ -182,11 +183,11 @@ class InputPreview(QWidget):
         start, base = self._drag
         pos = ev.globalPosition().toPoint()
         dx, dy = pos.x() - start.x(), pos.y() - start.y()
-        # The grabbed corner travels (-1, -1/aspect) per pixel of added width,
-        # so project the mouse delta onto that direction: dragging up-left grows
+        # The grabbed corner travels (+1, -1/aspect) per pixel of added width,
+        # so project the mouse delta onto that direction: dragging up-right grows
         # the preview, and a free-hand drag still tracks the pointer closely.
         k = 1.0 / self._aspect
-        self._apply_width(round(base + (-dx - dy * k) / (1 + k * k)))
+        self._apply_width(round(base + (dx - dy * k) / (1 + k * k)))
         ev.accept()
 
     def mouseReleaseEvent(self, ev) -> None:
@@ -213,7 +214,7 @@ class InputPreview(QWidget):
         host = self.parentWidget()
         if host is None:
             return
-        self.move(host.width() - self.width() - _MARGIN,
+        self.move(_MARGIN,
                   host.height() - self.height() - _MARGIN - self._bottom_inset)
         self.raise_()
 

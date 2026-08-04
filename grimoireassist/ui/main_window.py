@@ -97,9 +97,9 @@ class MainWindow(QMainWindow):
             "QSplitter::handle { background:#2a2a36; }")
         self.setCentralWidget(self._splitter)
 
-        # Live input-frame PiP: floats over the main pane's bottom-right corner,
+        # Live input-frame PiP: floats over the main pane's bottom-left corner,
         # outside the layout. Its refresh timer only runs while it is visible.
-        # Drag its top-left grip to resize; the width is persisted to config.
+        # Drag its top-right grip to resize; the width is persisted to config.
         self._preview = InputPreview(self.buffer, fps=cfg.ui.preview_fps,
                                      parent=self._main_host,
                                      width=cfg.ui.preview_width)
