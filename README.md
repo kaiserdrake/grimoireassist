@@ -267,6 +267,8 @@ ui:
   always_on_top: false
   auto_start_tracking: false       # start OCR tracking as soon as the app opens
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
+  idle_switch_s: 60                # seconds with no object detected before Auto Switch
+                                   # falls back to the Grimoire view
 logging: { to_file: false }        # write the OCR debug log to logs/ (☰ → Log to file)
 ```
 

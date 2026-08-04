@@ -26,6 +26,7 @@ ui:
   search_engine: google
   show_input_preview: true
   preview_fps: 10.0
-  preview_width: 494
+  preview_width: 213
+  idle_switch_s: 60
 logging:
   to_file: true

@@ -102,6 +102,8 @@ class UiConfig:
     preview_fps: float = 10.0           # PiP refresh rate; capped at 30 by the widget
     preview_width: int = 240            # PiP width in px (height follows the frame aspect);
                                         # set by dragging the preview's top-right grip
+    idle_switch_s: int = 60             # seconds with no object detected before Auto Switch
+                                        # falls back to the Grimoire view (min 1)
 
 
 @dataclass
@@ -283,6 +285,7 @@ class Config:
                 show_input_preview=bool(ui.get("show_input_preview", False)),
                 preview_fps=float(ui.get("preview_fps", 10.0)),
                 preview_width=int(ui.get("preview_width", 240)),
+                idle_switch_s=max(1, int(ui.get("idle_switch_s", 60))),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -355,6 +358,7 @@ class Config:
                 "show_input_preview": self.ui.show_input_preview,
                 "preview_fps": self.ui.preview_fps,
                 "preview_width": self.ui.preview_width,
+                "idle_switch_s": self.ui.idle_switch_s,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

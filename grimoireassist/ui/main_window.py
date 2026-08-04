@@ -1005,7 +1005,10 @@ class MainWindow(QMainWindow):
             self._start_idle()
 
     # ================= idle / auto-switch =================
-    _IDLE_TIMEOUT = 60   # seconds with no monster before switching to Grimoire
+    @property
+    def _idle_timeout(self) -> int:
+        """Seconds with no monster before switching to Grimoire (ui.idle_switch_s)."""
+        return max(1, int(getattr(self.cfg.ui, "idle_switch_s", 60)))
 
     def _start_idle(self) -> None:
         if not self._idle_timer.isActive():
@@ -1021,7 +1024,7 @@ class MainWindow(QMainWindow):
 
     def _on_idle_tick(self) -> None:
         self._idle_secs += 1
-        if self._idle_secs >= self._IDLE_TIMEOUT:
+        if self._idle_secs >= self._idle_timeout:
             self._idle_timer.stop()
             if self.panel:
                 self.panel.set_countdown(None)
@@ -1032,7 +1035,7 @@ class MainWindow(QMainWindow):
 
     def _update_countdown(self) -> None:
         if self.panel:
-            remaining = self._IDLE_TIMEOUT - self._idle_secs
+            remaining = self._idle_timeout - self._idle_secs
             self.panel.set_countdown(remaining)
 
     def _set_grimoire(self, visible: bool) -> None:
