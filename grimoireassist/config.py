@@ -107,6 +107,23 @@ class UiConfig:
 
 
 @dataclass
+class ReviewConfig:
+    """Rolling capture buffer behind the review screen (click the PiP).
+
+    Frames are stored downscaled + JPEG-encoded in buffer/, so the disk cost is
+    roughly `fps * minutes * 60 * frame_size`; at the defaults half an hour is
+    around 1 GB. `max_disk_mb` is the hard ceiling — whichever of the two
+    budgets binds first starts dropping the oldest frames.
+    """
+    enabled: bool = True
+    minutes: float = 30.0          # length of the rolling window
+    fps: float = 15.0              # frames kept per second (source fps is the cap)
+    max_height: int = 720          # downscale tall sources to this (0 = keep as-is)
+    jpeg_quality: int = 75         # 30..95
+    max_disk_mb: int = 4096        # ceiling on the buffer directory
+
+
+@dataclass
 class LoggingConfig:
     to_file: bool = False  # write the OCR debug log to logs/<ts>.log
 
@@ -166,6 +183,7 @@ class Config:
     ocr: OcrConfig = field(default_factory=OcrConfig)
     monster_name_list: List[str] = field(default_factory=list)  # active list
     ui: UiConfig = field(default_factory=UiConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     selected_game: Optional[str] = None
     games: Dict[str, GameSettings] = field(default_factory=dict)  # per-game settings
@@ -234,6 +252,7 @@ class Config:
         vc = raw.get("virtual_camera", {})
         ocr = raw.get("ocr", {})
         ui = raw.get("ui", {})
+        rev = raw.get("review", {})
         log = raw.get("logging", {})
 
         # per-game settings
@@ -286,6 +305,14 @@ class Config:
                 preview_fps=float(ui.get("preview_fps", 10.0)),
                 preview_width=int(ui.get("preview_width", 240)),
                 idle_switch_s=max(1, int(ui.get("idle_switch_s", 60))),
+            ),
+            review=ReviewConfig(
+                enabled=bool(rev.get("enabled", True)),
+                minutes=max(0.5, float(rev.get("minutes", 30.0))),
+                fps=min(max(float(rev.get("fps", 15.0)), 1.0), 60.0),
+                max_height=max(0, int(rev.get("max_height", 720))),
+                jpeg_quality=min(max(int(rev.get("jpeg_quality", 75)), 30), 95),
+                max_disk_mb=max(64, int(rev.get("max_disk_mb", 4096))),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -359,6 +386,14 @@ class Config:
                 "preview_fps": self.ui.preview_fps,
                 "preview_width": self.ui.preview_width,
                 "idle_switch_s": self.ui.idle_switch_s,
+            },
+            "review": {
+                "enabled": self.review.enabled,
+                "minutes": self.review.minutes,
+                "fps": self.review.fps,
+                "max_height": self.review.max_height,
+                "jpeg_quality": self.review.jpeg_quality,
+                "max_disk_mb": self.review.max_disk_mb,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

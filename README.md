@@ -12,6 +12,8 @@ machine. It:
    is configurable per game (e.g. your **[Grimoire](https://grimoire.laeradsphere.com/)** notes for
    MH Stories 3, or monsterbuddy.app for MH Stories 2).
 4. **Auto-switches** between the monster view and your Grimoire notes, or stays locked to either.
+5. **Keeps a rolling 30-minute buffer** of the capture feed so you can replay, scrub and save the
+   fight you just had — click the input preview to open the review screen.
 
 It's built with PyQt6 + QtWebEngine; the window itself never renders the camera feed (that was the
 main CPU cost) — only the detection navbar and the embedded info page.
@@ -167,6 +169,12 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
     timestamped PNG. The hotkey is **system-wide** (works while the app is unfocused), so it can
     be bound to a StreamDeck button or macro key that sends the combination. Change it via
     `ui.snapshot_hotkey` in `config.yaml`.
+- **Review**
+  - **Review capture… (Ctrl+R)** — open the review screen for the rolling buffer (same as clicking
+    the input preview).
+  - **Keep rolling capture buffer** — record the last 30 minutes to `buffer/`. **On by default**;
+    turning it off discards what is buffered.
+  - **Open saved clips folder** — open `recordings/`.
 - **OCR**
   - **Use GPU** — toggle GPU/CPU OCR live (model reloads on the first read after switching).
   - **Track confidence ▸** — minimum confidence required to track a monster: *Low and up (all)*,
@@ -182,6 +190,43 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Show OCR debug log** — show the in-app panel of raw/matched OCR text plus a manual
     *Test OCR* box for trying name matches.
   - **Log to file** — also write that debug log to `logs/ocr_<timestamp>.log`. **Off by default.**
+
+## Video review (rolling buffer)
+
+The app continuously keeps the **last 30 minutes** of the capture feed, so a fight is always
+replayable after the fact — nothing has to be armed beforehand.
+
+**Open it** by clicking the **input preview** (the PiP; enable it via ☰ → *Window* → *Input
+preview*), or with **Ctrl+R**. The review screen takes over the main pane; the live feed and OCR
+keep running behind it, and the buffer keeps recording while you watch.
+
+- **Play / pause** — the ▶ button, the **Space** bar, or clicking the picture.
+- **Playback speed** — `0.5×`, `0.75×`, `1×`, `1.5×`, `2×`. Timing comes from each frame's own
+  capture timestamp, so the speeds are exact and a stall in the source doesn't drift the clock.
+- **Drag to a frame** — drag the timeline (or click anywhere on it to jump straight there).
+  `←` / `→` step one frame, `Shift` + `←` / `→` jump a second, the mouse wheel steps over the
+  picture, `Home` / `End` go to the oldest / newest frame. The readout shows position, the frame
+  number, and the wall-clock time that frame was captured.
+- **Save clip** — writes everything currently in the buffer to `recordings/review_<timestamp>.mp4`
+  (`.avi`/MJPG if this machine's OpenCV can't open the mp4 encoder). It runs in the background with
+  a progress readout and can be cancelled; the 📁 button opens the folder.
+- **Close** — the ✕ button or **Esc**, which returns you to the live PiP.
+
+The buffer status (`⏺ Review buffer: 12:34`) sits in the status bar, and the PiP tooltip shows how
+much is buffered so far.
+
+### Cost, and how to tune it
+
+Raw frames are not an option — 30 minutes of 1080p30 would be ~340 GB — so kept frames are
+downscaled and JPEG-encoded into rolling segment files under `buffer/`. Only the index lives in
+memory (a few MB). At the defaults (720p, 15 fps, quality 75) half an hour is roughly **1 GB of
+disk**; `max_disk_mb` is a hard ceiling, and whichever budget binds first drops the oldest frames.
+`buffer/` is a cache — it is wiped on exit and on the next start, so only **saved clips** persist.
+
+Encoding happens on its own thread and the capture thread never waits on the disk: if the disk
+can't keep up, frames are dropped instead of stalling capture or the virtual camera. Turn the whole
+thing off with ☰ → *Review* → *Keep rolling capture buffer* (or `review.enabled: false`), which
+costs nothing but also means there is nothing to review.
 
 ## Detection behaviour
 
@@ -269,6 +314,13 @@ ui:
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
+review:                            # rolling capture buffer behind the review screen
+  enabled: true
+  minutes: 30.0                    # length of the rolling window
+  fps: 15.0                        # frames kept per second (the source fps is the cap)
+  max_height: 720                  # downscale taller sources to this (0 = keep as captured)
+  jpeg_quality: 75                 # 30–95; higher is bigger on disk
+  max_disk_mb: 4096                # hard ceiling on buffer/ — whichever budget binds first wins
 logging: { to_file: false }        # write the OCR debug log to logs/ (☰ → Log to file)
 ```
 
@@ -292,6 +344,7 @@ The two `monster_persist_*` values are optional per-game overrides of the global
 |------------|-------------------------|-------|
 | F9         | Open region calibration | in-app |
 | F11        | Toggle fullscreen       | in-app |
+| Ctrl+R     | Open the video review   | in-app |
 | Ctrl+Alt+S | Save frame snapshot     | **system-wide** (StreamDeck / macro-key friendly; configurable via `ui.snapshot_hotkey`) |
 
 If the snapshot combination is already taken by another app, GrimoireAssist falls back to an
@@ -300,8 +353,9 @@ in-app shortcut and says so in the status bar — pick a different `ui.snapshot_
 ## How it works
 
 A single **capture thread** owns the physical device and fans frames out to (a) the virtual-camera
-sink (clean) and (b) a one-slot buffer read by the OCR worker. The clean feed always goes to the
-virtual camera; the window shows only the detection navbar and the embedded info page.
+sink (clean), (b) a one-slot buffer read by the OCR worker, and (c) the rolling review recorder,
+which hands frames to its own encoder thread so the disk never stalls capture. The clean feed always
+goes to the virtual camera; the window shows only the detection navbar and the embedded info page.
 
 ```
 grimoireassist/
@@ -309,6 +363,7 @@ grimoireassist/
   config.py        YAML config (global) + per-game GameSettings (settings.json) + logging toggle
   capture.py       device owner + frame fan-out + named-device enumeration
   virtualcam.py    OBS Virtual Camera sink (clean feed)
+  reviewbuffer.py  rolling 30-min DVR: JPEG segment files + pinned snapshots + clip export
   hotkey.py        system-wide hotkey (Win32 RegisterHotKey via Qt native event filter)
   games.py         game catalog (GameInfo) loader + import-data helpers + app icon
   ocr/             OcrEngine + EasyOCR/Tesseract impls (confidence) + preprocessing + level helpers
@@ -317,7 +372,7 @@ grimoireassist/
   data/            app icon (icon.ico)
   ui/              main window (☰ menu, pills, view switch), monster panel (web views),
                    monster cards, calibration dialog, game-select & add-game dialogs,
-                   import wizard
+                   import wizard, input preview (PiP), review screen (playback + scrub)
 
 # Runtime data (next to config.yaml, created/edited at use):
 games/
@@ -326,6 +381,8 @@ games/
   <id>/import/          imported monster data.json + images/
 logs/                   OCR debug logs (only when ☰ → Log to file is on)
 snapshots/              frame snapshots saved by the snapshot hotkey (☰ → Snapshot frame)
+buffer/                 rolling review buffer (a cache — wiped on exit and on the next start)
+recordings/             clips saved from the review screen (these are yours; nothing deletes them)
 ```
 
 ## Tests
@@ -337,5 +394,8 @@ pytest
 ```
 
 Covers the persistent tracker (retention, confidence stickiness, UI-text rejection), the URL
-builder (path/search styles, multi-monster encoding, custom joiner), the game catalog/config, and
-config round-tripping — no camera or GUI required.
+builder (path/search styles, multi-monster encoding, custom joiner), the game catalog/config,
+config round-tripping, the rolling review buffer (fps decimation, time/size eviction, segment
+cleanup, snapshot pinning, clip export + cancel) and the review screen (playback clock at each
+speed, scrubbing, save, close) — no camera required. The review-screen tests drive Qt's
+**offscreen** platform, so they need no display either.

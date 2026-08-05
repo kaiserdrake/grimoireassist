@@ -10,6 +10,9 @@ The widget is resizable by dragging its top-right grip (it's anchored to the
 bottom-left, so that corner is the free one). Only the width is a degree of
 freedom — the height always follows the source frame's aspect ratio. The
 chosen width is reported via `size_changed` so the host can persist it.
+
+Clicking anywhere else on it emits `clicked`, which the host turns into the
+review screen for the rolling capture buffer.
 """
 from __future__ import annotations
 
@@ -33,11 +36,15 @@ class InputPreview(QWidget):
     bottom-left corner (outside its layout)."""
 
     size_changed = pyqtSignal(int)  # new width, emitted when a drag-resize ends
+    clicked = pyqtSignal()          # plain click on the image (not the grip)
 
     def __init__(self, buffer: FrameBuffer, fps: float, parent: QWidget,
                  width: int = DEFAULT_WIDTH) -> None:
         super().__init__(parent)
         self._buffer = buffer
+        self._hover = False                 # pointer over the widget: show the hint
+        self._press: Optional[tuple] = None  # press pos, for click-vs-drag
+        self._hint = ""                      # click affordance text, "" hides it
         self._pixmap: Optional[QPixmap] = None
         self._last_seq = -1
         self._frame_size: Optional[tuple[int, int]] = None  # (w, h) of source
@@ -53,6 +60,17 @@ class InputPreview(QWidget):
         self._timer.setInterval(round(1000 / min(max(fps, 1.0), 30.0)))
         self._timer.timeout.connect(self._tick)
         parent.installEventFilter(self)
+
+    def set_click_hint(self, text: str) -> None:
+        """Label shown across the bottom on hover (e.g. "⟲ Review last 30:00").
+        Empty text means the widget isn't clickable right now, and no hint or
+        pointing cursor is offered. Called on the status tick, so unchanged text
+        must not cost a repaint."""
+        if text == self._hint:
+            return
+        self._hint = text
+        self.setToolTip(text)
+        self.update()
 
     @pyqtSlot(list)
     def set_region_status(self, rects: list) -> None:
@@ -151,9 +169,21 @@ class InputPreview(QWidget):
                 else:
                     # configured region: subtle translucent tint, no border
                     p.fillRect(rect, QColor(90, 140, 255, 40))
+        if self._hover and self._hint:
+            self._paint_hint(p)
         p.setPen(QColor(42, 42, 54))
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         self._paint_grip(p)
+
+    def _paint_hint(self, p: QPainter) -> None:
+        """Translucent strip across the bottom naming what a click does."""
+        band = QRect(0, self.height() - 20, self.width(), 20)
+        p.fillRect(band, QColor(0, 0, 0, 150))
+        p.setPen(QColor(232, 232, 236))
+        font = p.font()
+        font.setPointSizeF(8.0)
+        p.setFont(font)
+        p.drawText(band, Qt.AlignmentFlag.AlignCenter, self._hint)
 
     def _paint_grip(self, p: QPainter) -> None:
         """Three short diagonals in the top-right corner: the resize handle."""
@@ -171,13 +201,20 @@ class InputPreview(QWidget):
             self._drag = (ev.globalPosition().toPoint(), self._width)
             ev.accept()
             return
+        if ev.button() == Qt.MouseButton.LeftButton and self._hint:
+            self._press = ev.position().toPoint()
+            ev.accept()
+            return
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
         if self._drag is None:
-            self.setCursor(Qt.CursorShape.SizeBDiagCursor
-                           if self._in_grip(ev.position())
-                           else Qt.CursorShape.ArrowCursor)
+            if self._in_grip(ev.position()):
+                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif self._hint:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
             super().mouseMoveEvent(ev)
             return
         start, base = self._drag
@@ -198,10 +235,25 @@ class InputPreview(QWidget):
             self.update()
             ev.accept()
             return
+        press, self._press = self._press, None
+        if press is not None and ev.button() == Qt.MouseButton.LeftButton:
+            # A click, not a sloppy drag: the pointer stayed put and is still on us.
+            moved = (ev.position().toPoint() - press).manhattanLength()
+            if moved <= 4 and self.rect().contains(ev.position().toPoint()):
+                self.clicked.emit()
+            ev.accept()
+            return
         super().mouseReleaseEvent(ev)
 
+    def enterEvent(self, ev) -> None:
+        self._hover = True
+        self.update()  # the hint must appear even when the source is stalled
+        super().enterEvent(ev)
+
     def leaveEvent(self, ev) -> None:
+        self._hover = False
         self.unsetCursor()
+        self.update()
         super().leaveEvent(ev)
 
     # ---- placement ---------------------------------------------------------

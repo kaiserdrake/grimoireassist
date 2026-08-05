@@ -4,6 +4,7 @@ Camera, calibration, always-on-top and game switching live behind a burger menu.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 import re
@@ -31,6 +32,7 @@ from ..games import (
 from ..hotkey import GlobalHotkey
 from ..ocr import build_engine
 from ..overlay import OverlayModel
+from ..reviewbuffer import RollingRecorder
 from ..virtualcam import VirtualCamSink
 from .browser import BrowserPanel, SEARCH_ENGINES
 from .calibrate import CalibrateDialog
@@ -38,6 +40,7 @@ from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
 from .monster_panel import MonsterNav, MonsterPanel, AutoSwitchToggle
 from .preview import InputPreview
+from .review import ReviewOverlay
 
 
 class MainWindow(QMainWindow):
@@ -105,9 +108,19 @@ class MainWindow(QMainWindow):
                                      parent=self._main_host,
                                      width=cfg.ui.preview_width)
         self._preview.size_changed.connect(self._on_preview_resized)
+        self._preview.clicked.connect(self._open_review)
         self._preview.setVisible(False)
         if cfg.ui.show_input_preview:
             self.act_preview.setChecked(True)  # fires _toggle_preview
+
+        # Rolling review buffer: the last N minutes of capture, kept on disk and
+        # replayed by the review screen. Started before capture so the frame sink
+        # has somewhere to put the very first frame.
+        self.recorder: Optional[RollingRecorder] = None
+        self._review: Optional[ReviewOverlay] = None
+        if cfg.review.enabled:
+            self._start_recorder()
+        self._sync_review_ui()
 
         # capture is global (one camera feeds every game)
         self._start_capture(cfg.capture.device_index)
@@ -219,9 +232,11 @@ class MainWindow(QMainWindow):
             if old is not None:
                 old.deleteLater()
         lay.addWidget(w)
-        # keep the PiP preview above the freshly swapped-in panel
+        # keep the floating children (PiP, review screen) above the new panel
         if getattr(self, "_preview", None) is not None:
             self._preview.raise_()
+        if getattr(self, "_review", None) is not None:
+            self._review.raise_()
 
     # ================= browser drawer =================
     def _toggle_browser(self) -> None:
@@ -301,6 +316,127 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Tracking will start automatically on launch" if checked
             else "Tracking will wait for Start on launch", 3000)
+
+    # ================= rolling review buffer =================
+    def _data_dir(self) -> Path:
+        """Where side-car data lives (buffer/, recordings/, snapshots/, logs/):
+        next to config.yaml, i.e. beside the exe — never the CWD."""
+        return Path(self.cfg._path).parent if self.cfg._path else Path(".")
+
+    def _capture_sink(self, frame) -> None:
+        """Clean-frame fan-out, called on the capture thread.
+
+        The review buffer goes first: `VirtualCamSink.send` paces itself with a
+        sleep, and running that first would fold the wait into the buffered
+        frames' timestamps. Neither call can raise into the capture loop —
+        `feed` swallows its own errors and CaptureThread guards the sink.
+        """
+        rec = self.recorder
+        if rec is not None:
+            rec.feed(frame)
+        if self.vcam is not None:
+            self.vcam.send(frame)
+
+    def _start_recorder(self) -> bool:
+        if self.recorder is not None and self.recorder.running:
+            return True
+        rev = self.cfg.review
+        recorder = RollingRecorder(
+            self._data_dir() / "buffer",
+            minutes=rev.minutes, fps=rev.fps, max_height=rev.max_height,
+            quality=rev.jpeg_quality, max_disk_mb=rev.max_disk_mb,
+        )
+        if not recorder.start():
+            self.statusBar().showMessage(
+                f"Review buffer: {recorder.last_error or 'could not start'}", 6000)
+            return False
+        self.recorder = recorder
+        return True
+
+    def _stop_recorder(self, confirm: bool = True) -> None:
+        """Stop recording and drop the buffered video (it is a live cache —
+        anything worth keeping was already saved from the review screen)."""
+        if self._review is not None:
+            self._review.close_review(confirm=confirm)
+        if self.recorder is not None:
+            self.recorder.stop(discard=True)
+            self.recorder = None
+
+    def _toggle_review_buffer(self, enabled: bool) -> None:
+        self.cfg.review.enabled = enabled
+        self.cfg.save()
+        if enabled:
+            if self._start_recorder():
+                self.statusBar().showMessage(
+                    f"Review buffer on — keeping the last "
+                    f"{self.cfg.review.minutes:g} minutes of capture", 4000)
+        else:
+            self._stop_recorder()
+            self.statusBar().showMessage(
+                "Review buffer off — buffered video discarded", 4000)
+        self._sync_review_ui()
+
+    def _sync_review_ui(self) -> None:
+        """Reflect the recorder's real state in the menu, PiP hint and status bar
+        (a start can fail, e.g. an unwritable buffer directory)."""
+        on = self.recorder is not None
+        self.act_review_buffer.blockSignals(True)   # setChecked would re-enter
+        self.act_review_buffer.setChecked(on)
+        self.act_review_buffer.blockSignals(False)
+        self.act_open_review.setEnabled(on)
+        self._update_review_status()
+
+    def _update_review_status(self) -> None:
+        """Refresh the buffered-length readouts (status bar + PiP click hint)."""
+        if self.recorder is None:
+            self._review_label.setText("Review buffer: off")
+            self._preview.set_click_hint("")
+            return
+        buffered = self.recorder.stats()["seconds"]
+        mins, secs = divmod(int(buffered), 60)
+        self._review_label.setText(f"⏺ Review buffer: {mins}:{secs:02d}")
+        self._preview.set_click_hint(f"⟲  Click to review — {mins}:{secs:02d} buffered")
+
+    def _open_review(self) -> None:
+        """Show the review screen over the main pane (PiP click / Ctrl+R)."""
+        if self._review is not None:
+            self._review.raise_()
+            return
+        if self.recorder is None:
+            self.statusBar().showMessage(
+                "Review buffer is off — turn it on under Review in the menu.", 5000)
+            return
+        # Let the encoder catch up so a click includes the newest frames.
+        self.recorder.drain(timeout=0.5)
+        snap = self.recorder.snapshot()
+        if not snap:
+            snap.close()
+            self.statusBar().showMessage(
+                "Nothing buffered yet — the review buffer fills as capture runs.", 4000)
+            return
+        self._review = ReviewOverlay(snap, self._data_dir() / "recordings",
+                                     parent=self._main_host)
+        self._review.closed.connect(self._on_review_closed)
+        self._preview.setVisible(False)   # its refresh timer stops with it
+        self._review.show()
+        self._review.raise_()
+
+    def _on_review_closed(self) -> None:
+        review, self._review = self._review, None
+        if review is not None:
+            review.deleteLater()
+        self._preview.setVisible(self.act_preview.isChecked())
+        if self._preview.isVisible():
+            self._preview.raise_()
+
+    def _open_recordings_folder(self) -> None:
+        import subprocess
+        out = self._data_dir() / "recordings"
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["explorer", str(out)])
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not open recordings: {exc}", 4000)
 
     # ================= frame snapshot =================
     def _save_snapshot(self) -> None:
@@ -387,6 +523,18 @@ class MainWindow(QMainWindow):
         self.menu.addAction("Calibrate regions…\tF9", self._open_calibration)
         _snap_label = self.cfg.ui.snapshot_hotkey.replace(" ", "").title()
         self.menu.addAction(f"Snapshot frame\t{_snap_label}", self._save_snapshot)
+
+        # ── Review ──────────────────────────────────────────────
+        self.menu.addSection("Review")
+        self.act_open_review = self.menu.addAction(
+            "Review capture…\tCtrl+R", self._open_review)
+        self.act_open_review.setToolTip(
+            "Play back the rolling capture buffer (or click the input preview)")
+        self.act_review_buffer = self.menu.addAction("Keep rolling capture buffer")
+        self.act_review_buffer.setCheckable(True)
+        self.act_review_buffer.setChecked(self.cfg.review.enabled)
+        self.act_review_buffer.toggled.connect(self._toggle_review_buffer)
+        self.menu.addAction("Open saved clips folder", self._open_recordings_folder)
 
         # ── OCR ─────────────────────────────────────────────────
         self.menu.addSection("OCR")
@@ -593,6 +741,10 @@ class MainWindow(QMainWindow):
         self.camera_menu.addAction("Refresh device list", self._populate_camera_menu)
 
     def _build_statusbar(self) -> None:
+        self._review_label = QLabel()
+        self._review_label.setToolTip(
+            "Rolling capture buffer — click the input preview to review it")
+        self.statusBar().addPermanentWidget(self._review_label)
         self._vcam_label = QLabel()
         self.statusBar().addPermanentWidget(self._vcam_label)
         self._update_vcam_label()
@@ -601,6 +753,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_browser)
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=self._open_review)
         # Snapshot hotkey is registered system-wide (RegisterHotKey) so it fires
         # even when the app is unfocused — e.g. from a StreamDeck / macro key.
         self._snapshot_hotkey = GlobalHotkey(self._save_snapshot)
@@ -860,7 +1013,7 @@ class MainWindow(QMainWindow):
             width=self.cfg.capture.width, height=self.cfg.capture.height,
             fps=self.cfg.capture.fps,
             buffer=self.buffer,
-            on_frame=(self.vcam.send if self.vcam else None),
+            on_frame=self._capture_sink,
             video_file=self.cfg.capture.video_file,
         )
         self.capture.start()
@@ -938,6 +1091,7 @@ class MainWindow(QMainWindow):
     # ================= loops / signals =================
     def _refresh_status(self) -> None:
         self._update_vcam_label()
+        self._update_review_status()
         seq = self.buffer.current_seq()
         flowing = seq != self._last_seq
         self._last_seq = seq
@@ -1090,6 +1244,9 @@ class MainWindow(QMainWindow):
             self.cfg.save()
         if getattr(self, "_snapshot_hotkey", None):
             self._snapshot_hotkey.unregister()
+        # Stop the recorder before capture, so no frame arrives for a buffer
+        # whose segment files have already been removed.
+        self._stop_recorder(confirm=False)
         if self.worker:
             self.worker.stop()
             self.worker.wait(1500)

@@ -8,4 +8,7 @@ cache/
 samples/
 .pytest_cache/
 logs/
+buffer/
+recordings/
+snapshots/
 games/*/import/

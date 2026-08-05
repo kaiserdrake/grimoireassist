@@ -1,6 +1,6 @@
 selected_game: mhs3
 capture:
-  device_index: 1
+  device_index: 0
   width: 1920
   height: 1080
   fps: 30
@@ -28,5 +28,12 @@ ui:
   preview_fps: 10.0
   preview_width: 213
   idle_switch_s: 60
+review:
+  enabled: true
+  minutes: 30.0
+  fps: 15.0
+  max_height: 720
+  jpeg_quality: 75
+  max_disk_mb: 4096
 logging:
   to_file: true
