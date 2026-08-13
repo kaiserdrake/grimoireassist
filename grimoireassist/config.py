@@ -20,6 +20,21 @@ def _parse_gpu(value) -> Union[bool, str]:
     return bool(value)
 
 
+def _clamp01(value) -> float:
+    """A 0..1 fraction from config, tolerant of junk."""
+    try:
+        return min(max(float(value), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pad_id(value, fallback: str) -> str:
+    """Normalise a configured controller id to one the overlay knows about.
+    `ui.controllers` is Qt-free, so this import stays headless-safe."""
+    from .ui.controllers import valid_id
+    return valid_id(value, fallback)
+
+
 @dataclass
 class Region:
     x: int = 0
@@ -104,6 +119,13 @@ class UiConfig:
                                         # set by dragging the preview's top-right grip
     idle_switch_s: int = 60             # seconds with no object detected before Auto Switch
                                         # falls back to the Grimoire view (min 1)
+    show_controller_map: bool = False   # face-button reference over the tracking view
+    controller_map_left: str = "playstation"   # pad shown on the left (see ui.controllers)
+    controller_map_right: str = "switch"       # pad shown on the right
+    controller_map_width: int = 420     # overlay width in px; set by dragging its grip
+    controller_map_x: float = 0.5       # position as a 0..1 share of the free space,
+    controller_map_y: float = 0.08      # so a resized window keeps it in proportion
+    controller_map_collapsed: bool = False  # folded down to the header pill
 
 
 @dataclass
@@ -305,6 +327,16 @@ class Config:
                 preview_fps=float(ui.get("preview_fps", 10.0)),
                 preview_width=int(ui.get("preview_width", 240)),
                 idle_switch_s=max(1, int(ui.get("idle_switch_s", 60))),
+                show_controller_map=bool(ui.get("show_controller_map", False)),
+                controller_map_left=_pad_id(
+                    ui.get("controller_map_left"), "playstation"),
+                controller_map_right=_pad_id(
+                    ui.get("controller_map_right"), "switch"),
+                controller_map_width=max(260, int(ui.get("controller_map_width", 420))),
+                controller_map_x=_clamp01(ui.get("controller_map_x", 0.5)),
+                controller_map_y=_clamp01(ui.get("controller_map_y", 0.08)),
+                controller_map_collapsed=bool(
+                    ui.get("controller_map_collapsed", False)),
             ),
             review=ReviewConfig(
                 enabled=bool(rev.get("enabled", True)),
@@ -386,6 +418,13 @@ class Config:
                 "preview_fps": self.ui.preview_fps,
                 "preview_width": self.ui.preview_width,
                 "idle_switch_s": self.ui.idle_switch_s,
+                "show_controller_map": self.ui.show_controller_map,
+                "controller_map_left": self.ui.controller_map_left,
+                "controller_map_right": self.ui.controller_map_right,
+                "controller_map_width": self.ui.controller_map_width,
+                "controller_map_x": self.ui.controller_map_x,
+                "controller_map_y": self.ui.controller_map_y,
+                "controller_map_collapsed": self.ui.controller_map_collapsed,
             },
             "review": {
                 "enabled": self.review.enabled,

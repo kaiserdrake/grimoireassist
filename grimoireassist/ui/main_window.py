@@ -38,6 +38,8 @@ from .browser import BrowserPanel, SEARCH_ENGINES
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
+from .controller_overlay import ControllerMapOverlay
+from .controllers import LAYOUTS, LAYOUT_ORDER
 from .monster_panel import MonsterNav, MonsterPanel, AutoSwitchToggle
 from .preview import InputPreview
 from .review import ReviewOverlay
@@ -112,6 +114,23 @@ class MainWindow(QMainWindow):
         self._preview.setVisible(False)
         if cfg.ui.show_input_preview:
             self.act_preview.setChecked(True)  # fires _toggle_preview
+
+        # Controller button reference: two pads side by side, floating over the
+        # tracking view only. Drag to move, grip to resize, chevron to collapse;
+        # all three are persisted to config.
+        self._ctrl_map = ControllerMapOverlay(
+            parent=self._main_host,
+            left_id=cfg.ui.controller_map_left,
+            right_id=cfg.ui.controller_map_right,
+            width=cfg.ui.controller_map_width,
+            fx=cfg.ui.controller_map_x, fy=cfg.ui.controller_map_y,
+            collapsed=cfg.ui.controller_map_collapsed)
+        self._ctrl_map.geometry_changed.connect(self._on_ctrl_map_geometry)
+        self._ctrl_map.collapsed_changed.connect(self._on_ctrl_map_collapsed)
+        self._ctrl_map.setVisible(False)
+        # Reflect the stored state in the menu item and toolbar button; the
+        # _set_grimoire(False) at the end of __init__ turns it visible.
+        self._sync_controller_map_buttons()
 
         # Rolling review buffer: the last N minutes of capture, kept on disk and
         # replayed by the review screen. Started before capture so the frame sink
@@ -232,9 +251,12 @@ class MainWindow(QMainWindow):
             if old is not None:
                 old.deleteLater()
         lay.addWidget(w)
-        # keep the floating children (PiP, review screen) above the new panel
+        # keep the floating children (PiP, controller map, review screen)
+        # above the new panel
         if getattr(self, "_preview", None) is not None:
             self._preview.raise_()
+        if getattr(self, "_ctrl_map", None) is not None:
+            self._ctrl_map.raise_()
         if getattr(self, "_review", None) is not None:
             self._review.raise_()
 
@@ -418,6 +440,7 @@ class MainWindow(QMainWindow):
                                      parent=self._main_host)
         self._review.closed.connect(self._on_review_closed)
         self._preview.setVisible(False)   # its refresh timer stops with it
+        self._sync_controller_map()       # the review screen owns the pane
         self._review.show()
         self._review.raise_()
 
@@ -428,6 +451,7 @@ class MainWindow(QMainWindow):
         self._preview.setVisible(self.act_preview.isChecked())
         if self._preview.isVisible():
             self._preview.raise_()
+        self._sync_controller_map()
 
     def _open_recordings_folder(self) -> None:
         import subprocess
@@ -593,6 +617,26 @@ class MainWindow(QMainWindow):
         self.act_preview.setCheckable(True)
         self.act_preview.setChecked(False)
         self.act_preview.toggled.connect(self._toggle_preview)
+        # Same story: the overlay doesn't exist yet, so __init__ re-checks this
+        # from config once it does.
+        self.act_ctrl_map = self.menu.addAction("Controller button map")
+        self.act_ctrl_map.setCheckable(True)
+        self.act_ctrl_map.setChecked(False)
+        self.act_ctrl_map.toggled.connect(self._set_controller_map_enabled)
+        pads_menu = self.menu.addMenu("Controller map")
+        for side, current in (("left", self.cfg.ui.controller_map_left),
+                              ("right", self.cfg.ui.controller_map_right)):
+            side_menu = pads_menu.addMenu(f"{side.capitalize()} pad")
+            group = QActionGroup(side_menu)
+            group.setExclusive(True)
+            for pad_id in LAYOUT_ORDER:
+                act = QAction(LAYOUTS[pad_id].name, side_menu)
+                act.setCheckable(True)
+                act.setChecked(current == pad_id)
+                act.triggered.connect(
+                    lambda _c, s=side, p=pad_id: self._set_controller_pad(s, p))
+                group.addAction(act)
+                side_menu.addAction(act)
 
         # ── Debug ────────────────────────────────────────────────
         self.menu.addSection("Debug")
@@ -647,6 +691,17 @@ class MainWindow(QMainWindow):
         self.grimoire_btn.clicked.connect(self._toggle_grimoire_view)
         self._update_grimoire_btn()
         tb.addWidget(self.grimoire_btn)
+        tb.addSeparator()
+
+        # Controller button map toggle — mirrors act_ctrl_map in the menu.
+        self.ctrl_map_btn = QToolButton()
+        self.ctrl_map_btn.setText("🎮")
+        self.ctrl_map_btn.setCheckable(True)
+        self.ctrl_map_btn.setToolTip("Toggle the controller button map")
+        self.ctrl_map_btn.setStyleSheet(
+            "QToolButton { font-size:15px; padding:2px 8px; }")
+        self.ctrl_map_btn.clicked.connect(self._set_controller_map_enabled)
+        tb.addWidget(self.ctrl_map_btn)
         tb.addSeparator()
 
         # Browser drawer toggle.
@@ -946,6 +1001,52 @@ class MainWindow(QMainWindow):
         self.cfg.ui.preview_width = int(width)
         self.cfg.save()
 
+    # ================= controller button map =================
+    def _sync_controller_map_buttons(self) -> None:
+        """Point the menu item and the toolbar button at the stored state
+        without re-entering their own toggled/clicked slots."""
+        for widget in (self.act_ctrl_map, self.ctrl_map_btn):
+            widget.blockSignals(True)
+            widget.setChecked(self.cfg.ui.show_controller_map)
+            widget.blockSignals(False)
+
+    def _sync_controller_map(self) -> None:
+        """The overlay belongs to the tracking view only — never the Grimoire,
+        never over the review screen. Every view change funnels through here."""
+        show = (self.cfg.ui.show_controller_map
+                and not self._grimoire_shown
+                and getattr(self, "_review", None) is None)
+        self._ctrl_map.setVisible(show)
+        if show:
+            self._ctrl_map.raise_()
+
+    def _set_controller_map_enabled(self, on: bool) -> None:
+        """Single entry point for the two toggles, so they can't drift apart."""
+        self.cfg.ui.show_controller_map = bool(on)
+        self.cfg.save()
+        self._sync_controller_map_buttons()
+        self._sync_controller_map()
+
+    def _set_controller_pad(self, side: str, pad_id: str) -> None:
+        if side == "left":
+            self.cfg.ui.controller_map_left = pad_id
+        else:
+            self.cfg.ui.controller_map_right = pad_id
+        self.cfg.save()
+        self._ctrl_map.set_pair(self.cfg.ui.controller_map_left,
+                                self.cfg.ui.controller_map_right)
+
+    def _on_ctrl_map_geometry(self, fx: float, fy: float, width: int) -> None:
+        """Persist a move or resize of the overlay (once, on mouse release)."""
+        self.cfg.ui.controller_map_x = float(fx)
+        self.cfg.ui.controller_map_y = float(fy)
+        self.cfg.ui.controller_map_width = int(width)
+        self.cfg.save()
+
+    def _on_ctrl_map_collapsed(self, collapsed: bool) -> None:
+        self.cfg.ui.controller_map_collapsed = bool(collapsed)
+        self.cfg.save()
+
     def _toggle_file_logging(self, enabled: bool) -> None:
         self.cfg.logging.to_file = enabled
         self.cfg.save()
@@ -1197,6 +1298,7 @@ class MainWindow(QMainWindow):
         if self.panel:
             self.panel.set_grimoire_visible(visible)
         self._update_grimoire_btn()
+        self._sync_controller_map()
 
     def _update_grimoire_btn(self) -> None:
         """Reflect the current view in the manual view button: the icon shows

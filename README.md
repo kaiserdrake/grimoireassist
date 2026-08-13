@@ -185,11 +185,34 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Add game…** — add a new game to the catalog (id, name, info-URL template, options).
   - **Switch game…** — reopen the game picker.
   - **Import monster data…** — fetch the monster list + info from your Grimoire notes (see below).
-- **Window** — **Always on top** / **Fullscreen (F11)**.
+- **Window** — **Always on top** / **Fullscreen (F11)** / **Input preview** /
+  **Controller button map** / **Controller map ▸** (see below).
 - **Debug**
   - **Show OCR debug log** — show the in-app panel of raw/matched OCR text plus a manual
     *Test OCR* box for trying name matches.
   - **Log to file** — also write that debug log to `logs/ocr_<timestamp>.log`. **Off by default.**
+
+## Controller button map
+
+Switching between a PlayStation, Switch, Xbox or Steam Deck pad mid-session is confusing: the four
+face buttons share one physical diamond but carry different labels, and Nintendo swaps A/B relative
+to Xbox. The overlay shows two pads side by side — face buttons in their real positions, plus
+bumpers and triggers — so a glance tells you what the button under your thumb is called on the
+other pad. There are no mapping lines; the shared geometry does the work.
+
+**Turn it on** with the **🎮** navbar button or ☰ → *Window* → *Controller button map* (the two
+always agree). **Pick the pair** under ☰ → *Window* → *Controller map ▸ Left pad / Right pad*.
+
+It shows **only on the tracking view** — it disappears on the Grimoire view and while the review
+screen is open, and comes back on its own.
+
+- **Drag it anywhere** to move it. The position is stored as a share of the free space, so it keeps
+  its relative place when you resize the window and never ends up off-screen.
+- **Drag the bottom-right grip** to resize; the layout scales with the width.
+- **Click the chevron** in the header (or double-click the header) to fold it down to a compact
+  pill, in place. Click again to restore the exact size.
+
+Position, size, collapsed state and the chosen pair are all saved to `config.yaml` under `ui:`.
 
 ## Video review (rolling buffer)
 
@@ -314,6 +337,13 @@ ui:
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
+  show_controller_map: false       # controller button map over the tracking view (🎮)
+  controller_map_left: playstation # playstation | switch | xbox | steamdeck
+  controller_map_right: switch
+  controller_map_width: 420        # overlay width in px; drag its corner grip
+  controller_map_x: 0.5            # position as a 0–1 share of the free space,
+  controller_map_y: 0.08           # so a resized window keeps it in proportion
+  controller_map_collapsed: false  # folded down to the header pill
 review:                            # rolling capture buffer behind the review screen
   enabled: true
   minutes: 30.0                    # length of the rolling window
@@ -372,7 +402,8 @@ grimoireassist/
   data/            app icon (icon.ico)
   ui/              main window (☰ menu, pills, view switch), monster panel (web views),
                    monster cards, calibration dialog, game-select & add-game dialogs,
-                   import wizard, input preview (PiP), review screen (playback + scrub)
+                   import wizard, input preview (PiP), review screen (playback + scrub),
+                   controller button map (overlay + pad layout data)
 
 # Runtime data (next to config.yaml, created/edited at use):
 games/

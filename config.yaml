@@ -28,6 +28,13 @@ ui:
   preview_fps: 10.0
   preview_width: 213
   idle_switch_s: 60
+  show_controller_map: true
+  controller_map_left: switch
+  controller_map_right: switch
+  controller_map_width: 382
+  controller_map_x: 0.3226221079691517
+  controller_map_y: 0.9073569482288828
+  controller_map_collapsed: false
 review:
   enabled: true
   minutes: 30.0
