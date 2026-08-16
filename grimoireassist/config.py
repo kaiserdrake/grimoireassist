@@ -119,7 +119,7 @@ class UiConfig:
                                         # set by dragging the preview's top-right grip
     idle_switch_s: int = 60             # seconds with no object detected before Auto Switch
                                         # falls back to the Grimoire view (min 1)
-    show_controller_map: bool = False   # face-button reference over the tracking view
+    show_controller_map: bool = False   # face-button reference over the main pane
     controller_map_left: str = "playstation"   # pad shown on the left (see ui.controllers)
     controller_map_right: str = "switch"       # pad shown on the right
     controller_map_width: int = 420     # overlay width in px; set by dragging its grip

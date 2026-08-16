@@ -1,5 +1,5 @@
-"""Controller button reference: two pads side by side, floating over the
-tracking view.
+"""Controller button reference: two pads side by side, floating over the main
+pane.
 
 Switching between a PlayStation, Switch, Xbox or Steam Deck pad mid-session is
 confusing because the four face buttons share one physical diamond but carry

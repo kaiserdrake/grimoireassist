@@ -203,8 +203,9 @@ other pad. There are no mapping lines; the shared geometry does the work.
 **Turn it on** with the **🎮** navbar button or ☰ → *Window* → *Controller button map* (the two
 always agree). **Pick the pair** under ☰ → *Window* → *Controller map ▸ Left pad / Right pad*.
 
-It shows **only on the tracking view** — it disappears on the Grimoire view and while the review
-screen is open, and comes back on its own.
+Like the input preview, it **rides above whichever view is showing** — tracking or Grimoire. Only
+the review screen displaces it (that one owns the whole pane); it comes back on its own when you
+close it.
 
 - **Drag it anywhere** to move it. The position is stored as a share of the free space, so it keeps
   its relative place when you resize the window and never ends up off-screen.
@@ -337,7 +338,7 @@ ui:
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
-  show_controller_map: false       # controller button map over the tracking view (🎮)
+  show_controller_map: false       # controller button map over the main pane (🎮)
   controller_map_left: playstation # playstation | switch | xbox | steamdeck
   controller_map_right: switch
   controller_map_width: 420        # overlay width in px; drag its corner grip

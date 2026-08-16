@@ -115,9 +115,9 @@ class MainWindow(QMainWindow):
         if cfg.ui.show_input_preview:
             self.act_preview.setChecked(True)  # fires _toggle_preview
 
-        # Controller button reference: two pads side by side, floating over the
-        # tracking view only. Drag to move, grip to resize, chevron to collapse;
-        # all three are persisted to config.
+        # Controller button reference: two pads side by side, floating over
+        # whichever view is showing. Drag to move, grip to resize, chevron to
+        # collapse; all three are persisted to config.
         self._ctrl_map = ControllerMapOverlay(
             parent=self._main_host,
             left_id=cfg.ui.controller_map_left,
@@ -1011,10 +1011,11 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
 
     def _sync_controller_map(self) -> None:
-        """The overlay belongs to the tracking view only — never the Grimoire,
-        never over the review screen. Every view change funnels through here."""
+        """Like the PiP, the overlay rides above whichever view is showing —
+        tracking or Grimoire. Only the review screen displaces it, because that
+        one owns the whole pane. Still called on every view change so the
+        overlay is re-raised over the newly shown page."""
         show = (self.cfg.ui.show_controller_map
-                and not self._grimoire_shown
                 and getattr(self, "_review", None) is None)
         self._ctrl_map.setVisible(show)
         if show:
