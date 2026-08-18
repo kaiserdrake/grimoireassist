@@ -15,8 +15,8 @@ from PyQt6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QToolBar,
+    QApplication, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QToolBar,
     QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -87,6 +87,9 @@ class MainWindow(QMainWindow):
         _host_lay.setSpacing(0)
         self.browser = BrowserPanel(cfg=cfg)
         self.browser.setVisible(False)   # drawer starts closed
+        # Prime the bookmark list; the drawer re-syncs it on its own whenever a
+        # bookmarks page is shown, since the focus README follows Grimoire.
+        self.browser.refresh_bookmarks_source()
         self.browser.status_message.connect(
             lambda msg: self.statusBar().showMessage(msg, 4000))
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -230,9 +233,6 @@ class MainWindow(QMainWindow):
         self._set_main_widget(wrapper)
         self._refresh_panel()
 
-        # bookmarks follow the game (covers startup and every switch)
-        self.browser.set_game_bookmarks(game.bookmarks_url)
-
         # Only (re)start the OCR worker if tracking was already active.
         # On first load _tracking_active is False, so we wait for the user
         # to press Start before burning CPU on inference.
@@ -273,6 +273,9 @@ class MainWindow(QMainWindow):
             main_w = round(total * self._main_ratio)
             self._splitter.setSizes([main_w, total - main_w])
             self.browser.focus_url_bar()
+            # Bookmarks track the Grimoire focus game, so re-read them whenever
+            # the drawer comes back into view (throttled inside the panel).
+            self.browser.sync_bookmarks(force=False)
         else:
             sizes = self._splitter.sizes()
             if sizes[1] > 0:
@@ -601,6 +604,7 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, k=key: self.browser.set_search_engine(k))
             engine_group.addAction(act)
             engine_menu.addAction(act)
+        self.menu.addAction("Grimoire user…", self._set_grimoire_user)
 
         # ── Window ───────────────────────────────────────────────
         self.menu.addSection("Window")
@@ -1027,6 +1031,19 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self._sync_controller_map_buttons()
         self._sync_controller_map()
+
+    def _set_grimoire_user(self) -> None:
+        """Ask for the Grimoire account whose focus README holds the bookmarks."""
+        user, ok = QInputDialog.getText(
+            self, "Grimoire user",
+            "Bookmarks are read from this user's focus README\n"
+            f"on {self.cfg.grimoire.base_url}:",
+            QLineEdit.EchoMode.Normal, self.cfg.grimoire.user)
+        if not ok:
+            return
+        self.cfg.grimoire.user = user.strip()
+        self.cfg.save()
+        self.browser.refresh_bookmarks_source()
 
     def _set_controller_pad(self, side: str, pad_id: str) -> None:
         if side == "left":

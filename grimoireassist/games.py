@@ -25,7 +25,6 @@ class GameInfo:
     requires_login: bool = False
     notes_url: str = ""
     cards_per_row: int = 4
-    bookmarks_url: str = ""   # raw-markdown note with a "# Bookmarks" section
 
 
 # ── Catalog (games/games.json) ─────────────────────────────────────────────────
@@ -51,7 +50,6 @@ def load_catalog(config_path=None) -> Tuple[GameInfo, ...]:
             requires_login=bool(d.get("requires_login", False)),
             notes_url=d.get("notes_url", ""),
             cards_per_row=int(d.get("cards_per_row", 4)),
-            bookmarks_url=d.get("bookmarks_url", ""),
         ) for d in data)
     except Exception:
         return tuple()
@@ -90,7 +88,6 @@ def save_game(game: GameInfo, config_path) -> None:
         "requires_login": game.requires_login,
         "notes_url": game.notes_url,
         "cards_per_row": game.cards_per_row,
-        "bookmarks_url": game.bookmarks_url,
     }
     # Replace existing entry with same id, or append
     updated = [e for e in existing if e.get("id") != game.id]

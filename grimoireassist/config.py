@@ -146,6 +146,27 @@ class ReviewConfig:
 
 
 @dataclass
+class GrimoireConfig:
+    """Grimoire notes server.
+
+    The browser drawer's bookmarks come from the focus README of `user`, fetched
+    as raw markdown from `<base_url>/api/focus/readme/raw?user=<user>`. Links
+    under that note's `# Bookmarks` heading become the new-tab bookmark list."""
+    base_url: str = "https://grimoire.laeradsphere.com"
+    user: str = ""
+
+    def readme_raw_url(self) -> str:
+        """Raw-markdown URL of the user's focus README, or "" if unconfigured."""
+        import urllib.parse
+        base = self.base_url.strip().rstrip("/")
+        user = self.user.strip()
+        if not base or not user:
+            return ""
+        return (f"{base}/api/focus/readme/raw"
+                f"?user={urllib.parse.quote(user, safe='')}")
+
+
+@dataclass
 class LoggingConfig:
     to_file: bool = False  # write the OCR debug log to logs/<ts>.log
 
@@ -206,6 +227,7 @@ class Config:
     monster_name_list: List[str] = field(default_factory=list)  # active list
     ui: UiConfig = field(default_factory=UiConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    grimoire: GrimoireConfig = field(default_factory=GrimoireConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     selected_game: Optional[str] = None
     games: Dict[str, GameSettings] = field(default_factory=dict)  # per-game settings
@@ -275,6 +297,7 @@ class Config:
         ocr = raw.get("ocr", {})
         ui = raw.get("ui", {})
         rev = raw.get("review", {})
+        grim = raw.get("grimoire", {}) or {}
         log = raw.get("logging", {})
 
         # per-game settings
@@ -345,6 +368,11 @@ class Config:
                 max_height=max(0, int(rev.get("max_height", 720))),
                 jpeg_quality=min(max(int(rev.get("jpeg_quality", 75)), 30), 95),
                 max_disk_mb=max(64, int(rev.get("max_disk_mb", 4096))),
+            ),
+            grimoire=GrimoireConfig(
+                base_url=str(grim.get(
+                    "base_url", "https://grimoire.laeradsphere.com")).strip(),
+                user=str(grim.get("user", "") or "").strip(),
             ),
             logging=LoggingConfig(to_file=bool(log.get("to_file", False))),
             selected_game=selected_game,
@@ -433,6 +461,10 @@ class Config:
                 "max_height": self.review.max_height,
                 "jpeg_quality": self.review.jpeg_quality,
                 "max_disk_mb": self.review.max_disk_mb,
+            },
+            "grimoire": {
+                "base_url": self.grimoire.base_url,
+                "user": self.grimoire.user,
             },
             "logging": {"to_file": self.logging.to_file},
             # Per-game settings are stored in games/<id>/settings.json, not here.

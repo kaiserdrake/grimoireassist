@@ -185,6 +185,11 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Add game…** — add a new game to the catalog (id, name, info-URL template, options).
   - **Switch game…** — reopen the game picker.
   - **Import monster data…** — fetch the monster list + info from your Grimoire notes (see below).
+- **Browser** (the 🌐 drawer)
+  - **Search engine ▸** — engine used when the address bar gets a query rather than a URL.
+  - **Grimoire user…** — the Grimoire account whose **focus README** supplies the drawer's
+    bookmarks. New tabs list every link under that note's `# Bookmarks` heading; ★ re-syncs.
+    Stored as `grimoire.user` in `config.yaml`.
 - **Window** — **Always on top** / **Fullscreen (F11)** / **Input preview** /
   **Controller button map** / **Controller map ▸** (see below).
 - **Debug**
@@ -352,7 +357,21 @@ review:                            # rolling capture buffer behind the review sc
   max_height: 720                  # downscale taller sources to this (0 = keep as captured)
   jpeg_quality: 75                 # 30–95; higher is bigger on disk
   max_disk_mb: 4096                # hard ceiling on buffer/ — whichever budget binds first wins
+grimoire:                          # source of the browser drawer's bookmarks
+  base_url: https://grimoire.laeradsphere.com
+  user: ''                         # ☰ → Browser → Grimoire user…; blank = no bookmarks
 logging: { to_file: false }        # write the OCR debug log to logs/ (☰ → Log to file)
+```
+
+Bookmarks are fetched from `<base_url>/api/focus/readme/raw?user=<user>` and parsed out of the
+returned markdown: every list item under the `# Bookmarks` heading becomes a link on the browser's
+new-tab page.
+
+```markdown
+# Bookmarks
+
+* [Monster Tier List](https://example.com/tiers)
+* [Best Builds](https://example.com/builds)
 ```
 
 **Per-game settings** live in `games/<id>/settings.json` (written by calibration / Add Game), not

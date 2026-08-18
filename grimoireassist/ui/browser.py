@@ -6,21 +6,26 @@ when closed the main view fills the window. Tabs share one persistent QWebEngine
 ("browser_persistent" — separate from the grimoire view's shared profile) so
 logins survive restarts.
 
-New tabs show the current game's bookmarks, fetched from a raw-markdown
-Grimoire endpoint (game.bookmarks_url). Bookmarks live under a heading:
+New tabs show the user's bookmarks, parsed out of their Grimoire focus README
+(`grimoire.base_url` + `/api/focus/readme/raw?user=` + `grimoire.user`, both from
+config.yaml). Bookmarks live under a heading in that note:
 
     # Bookmarks
 
     * [link1](url)
     * [link2](url)
 
-The list is re-fetched at startup, on game switch, and via the ★ Sync button.
+The focus README tracks whichever game is in focus on the Grimoire side, so the
+list is re-fetched every time a bookmarks page is actually shown (new tab, tab
+switch, drawer opened) as well as on the ★ Sync button. Those view triggers are
+throttled so opening the drawer onto a bookmarks tab is one request, not three.
 """
 from __future__ import annotations
 
 import html
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import List, Optional, Tuple
@@ -42,6 +47,10 @@ except Exception:  # pragma: no cover - WebEngine missing
 from .monster_panel import _inject_clipboard_fix
 
 _BROWSER_PROFILE_NAME = "browser_persistent"
+
+# View-triggered syncs closer together than this reuse the last result. Opening
+# the drawer fires tab-change + focus in the same instant; ★ ignores the window.
+_SYNC_MIN_INTERVAL_S = 2.0
 
 # Default search engines. Each template takes the URL-encoded query.
 SEARCH_ENGINES: dict[str, Tuple[str, str]] = {
@@ -168,7 +177,7 @@ if _HAVE_WEBENGINE:
 # ── panel ──────────────────────────────────────────────────────────────────────
 
 class BrowserPanel(QWidget):
-    """Tabbed browser drawer with a nav bar and per-game bookmarks."""
+    """Tabbed browser drawer with a nav bar and Grimoire-sourced bookmarks."""
 
     status_message = pyqtSignal(str)
     # (seq, bookmarks, error) — emitted from the fetch thread, handled on the
@@ -182,6 +191,7 @@ class BrowserPanel(QWidget):
         self._bookmarks: List[Tuple[str, str]] = []
         self._bookmarks_url: str = ""
         self._sync_seq = 0          # ignore results from stale fetches
+        self._last_sync_t = 0.0     # monotonic clock of the last started fetch
         self._bookmarks_fetched.connect(self._on_bookmarks_fetched)
 
         # plain QWidgets only paint stylesheet backgrounds with this attribute
@@ -237,7 +247,7 @@ class BrowserPanel(QWidget):
         nav.addWidget(self._url_bar, 1)
 
         self._newtab_btn = _btn("＋", "New tab (Ctrl+T)", lambda: self.new_tab())
-        self._sync_btn = _btn("★", "Sync game bookmarks",
+        self._sync_btn = _btn("★", "Sync Grimoire bookmarks",
                               lambda: self.sync_bookmarks())
         outer.addWidget(navbar)
 
@@ -305,6 +315,7 @@ class BrowserPanel(QWidget):
             view.setUrl(QUrl(url))
         elif not blank:
             self._show_bookmarks_page(view)
+            self.sync_bookmarks(force=False)   # the focus README may have moved on
         if focus:
             self._tabs.setCurrentIndex(idx)
         return view
@@ -384,7 +395,10 @@ class BrowserPanel(QWidget):
             self._sync_url_bar(view)
 
     def _on_current_changed(self, _index: int) -> None:
-        self._sync_url_bar(self.current_view())
+        view = self.current_view()
+        self._sync_url_bar(view)
+        if getattr(view, "is_bookmarks_page", False):
+            self.sync_bookmarks(force=False)
 
     def _sync_url_bar(self, view) -> None:
         if view is None:
@@ -440,25 +454,34 @@ class BrowserPanel(QWidget):
             self.current_view().reload()
 
     # ── bookmarks ───────────────────────────────────────────────────────
-    def set_game_bookmarks(self, url: str) -> None:
-        """Point the drawer at a game's bookmarks note and fetch it.
+    def _readme_url(self) -> str:
+        """Current focus-README URL from config, or "" if no user is set."""
+        if self._cfg is None:
+            return ""
+        return self._cfg.grimoire.readme_raw_url()
 
-        Called at startup and on every game switch."""
-        self._bookmarks_url = (url or "").strip()
+    def refresh_bookmarks_source(self) -> None:
+        """Drop the cached list and re-fetch — `grimoire.user` changed."""
         self._bookmarks = []
-        if self._bookmarks_url:
-            self.sync_bookmarks()
-        else:
-            self._refresh_bookmark_tabs()
+        self.sync_bookmarks()
 
-    def sync_bookmarks(self) -> None:
-        """Fetch the bookmarks markdown in the background."""
-        url = self._bookmarks_url
+    def sync_bookmarks(self, force: bool = True) -> None:
+        """Fetch the focus README markdown in the background.
+
+        `force` is True for the deliberate triggers (★, a user change) and False
+        for the ones that merely put a bookmarks page on screen, which are
+        throttled to `_SYNC_MIN_INTERVAL_S`."""
+        # Read the URL fresh each time so a config edit needs no other wiring.
+        url = self._bookmarks_url = self._readme_url()
         if not url:
             self.status_message.emit(
-                "No bookmarks URL for this game — set one in the game entry.")
+                "No Grimoire user set — pick one under Browser in the menu.")
             self._refresh_bookmark_tabs()
             return
+        now = time.monotonic()
+        if not force and (now - self._last_sync_t) < _SYNC_MIN_INTERVAL_S:
+            return
+        self._last_sync_t = now
         self._sync_seq += 1
         seq = self._sync_seq
 
@@ -489,9 +512,9 @@ class BrowserPanel(QWidget):
 
     def _show_bookmarks_page(self, view) -> None:
         view.is_bookmarks_page = True
-        hint = ("No bookmarks URL for this game — add one in the game entry, "
+        hint = ("No Grimoire user set — choose one under Browser in the menu, "
                 "then press ★ to sync."
-                if not self._bookmarks_url else
+                if not self._readme_url() else
                 "No bookmarks found under a '# Bookmarks' heading — "
                 "press ★ to sync again.")
         view.setHtml(_bookmarks_html(self._bookmarks, hint))

@@ -22,7 +22,7 @@ ui:
   always_on_top: false
   auto_start_tracking: true
   snapshot_hotkey: ctrl+alt+s
-  browser_split_ratio: 0.5
+  browser_split_ratio: 0.33507306889352817
   search_engine: google
   show_input_preview: true
   preview_fps: 10.0
@@ -32,8 +32,8 @@ ui:
   controller_map_left: switch
   controller_map_right: switch
   controller_map_width: 382
-  controller_map_x: 0.3226221079691517
-  controller_map_y: 0.9073569482288828
+  controller_map_x: 0.9461538461538461
+  controller_map_y: 0.9827814569536424
   controller_map_collapsed: false
 review:
   enabled: true
@@ -42,5 +42,8 @@ review:
   max_height: 720
   jpeg_quality: 75
   max_disk_mb: 4096
+grimoire:
+  base_url: https://grimoire.laeradsphere.com
+  user: norman
 logging:
   to_file: true
