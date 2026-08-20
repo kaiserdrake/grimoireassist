@@ -35,6 +35,8 @@ ui:
   controller_map_x: 0.9461538461538461
   controller_map_y: 0.9827814569536424
   controller_map_collapsed: false
+  dialogue_collapsed: false
+  dialogue_test_box: true
 review:
   enabled: true
   minutes: 30.0
@@ -42,6 +44,19 @@ review:
   max_height: 720
   jpeg_quality: 75
   max_disk_mb: 4096
+speech:
+  enabled: false
+  muted: false
+  backend: auto
+  voice_online: en-GB-RyanNeural
+  voice_offline: ''
+  rate: 4
+  volume: 90
+  stable_frames: 2
+  min_chars: 6
+  repeat_window_s: 25.0
+  max_queue: 3
+  edge_retry_s: 60.0
 grimoire:
   base_url: https://grimoire.laeradsphere.com
   user: norman

@@ -8,3 +8,7 @@ easyocr==1.7.2
 PyYAML==6.0.2
 numpy>=1.26  # numpy 2.x works with the CUDA torch build; see README GPU section
 pygrabber==0.2  # DirectShow device friendly-name enumeration (Windows)
+# Dialogue narration. edge-tts drives the default online neural voice; without
+# it the app silently falls back to the offline Windows (SAPI) voice, which
+# needs nothing beyond comtypes (already pulled in by pygrabber).
+edge-tts==7.2.8

@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from .config import Config, Region
+from .dialogue import StatementReader, assemble_statement
 from .ocr import OcrEngine, conf_level, level_floor
 
 
@@ -286,6 +287,8 @@ try:
         monsters_changed = pyqtSignal(list)
         monster_killed = pyqtSignal(str)
         debug_text = pyqtSignal(str, list)  # status_text, monster_texts
+        # A finished dialogue-region statement, ready to be spoken.
+        dialogue_text = pyqtSignal(str)
         # [(x, y, w, h, matched)] in frame coords: every configured region with
         # matched=False (outline), plus a matched=True box per recognised text.
         region_status = pyqtSignal(list)
@@ -306,6 +309,13 @@ try:
             self._end_boxes: list = []     # frame-coord boxes of the end keyword
             self._last_status: Optional[list] = None  # last emitted region_status payload
             self._end_text_logged = ""     # last battle-end text written to the debug log
+            self._dlg_text = ""            # last text read from the dialogue region
+            self._dlg_boxes: list = []     # frame-coord boxes of the dialogue lines
+            self.reader = StatementReader(
+                stable_frames=cfg.speech.stable_frames,
+                min_chars=cfg.speech.min_chars,
+                repeat_window_s=cfg.speech.repeat_window_s,
+            )
             self.tracker = MonsterTracker(
                 persist_seconds=cfg.effective_monster_persist_s(),
                 end_persist_seconds=cfg.effective_monster_persist_end_s(),
@@ -389,6 +399,48 @@ try:
                 self._end_ocr_t = now
             return self._end_cached
 
+        # A dialogue region that is essentially one flat colour holds no text, so
+        # it isn't worth an inference. Anything with real contrast is read.
+        _BLANK_STDDEV = 3.0
+
+        def _read_dialogue(self, frame: np.ndarray, now: float) -> None:
+            """OCR the dialogue region and emit whole statements for speech.
+
+            This region is deliberately NOT change-gated the way the monster and
+            battle-end regions are. Measuring a typing-out dialogue box shows why:
+            six more characters appearing move the downscaled fingerprint about as
+            much as the threshold itself (~1.8–2.0), while the *settled* box with
+            its blinking "press A to continue" arrow moves it far more (2.0–8.7).
+            The visual signal is anti-correlated with what we need to know, and
+            raising the fingerprint resolution doesn't separate them — so a
+            visually-gated read would happily declare a half-typed line finished.
+
+            Only the text can decide when a statement is done, so while narration
+            is on the region is read every poll and `StatementReader` settles on
+            successive identical reads. That is the cost of the feature; it is
+            paid only when narration is enabled and a region is configured."""
+            region = self.cfg.ocr.regions_dialogue
+            if not self.cfg.speech.enabled or not region.is_set():
+                if self._dlg_boxes or self._dlg_text:
+                    self._dlg_boxes, self._dlg_text = [], ""
+                    self.reader.reset()
+                return
+            crop = self._crop(frame, region)
+            if crop is None:
+                return
+            g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+            if float(g.std()) < self._BLANK_STDDEV:
+                lines = []          # flat region: no box on screen
+            else:
+                lines = self.engine.read_lines(crop)
+            self._dlg_boxes = [(region.x + b[0], region.y + b[1], b[2], b[3])
+                               for _t, _c, b in lines if b is not None]
+            self._dlg_text = assemble_statement(lines)
+            statement = self.reader.update(self._dlg_text, now)
+            if statement:
+                self.debug_text.emit(f"[dialogue] {statement}", [])
+                self.dialogue_text.emit(statement)
+
         def run(self) -> None:
             interval = 1.0 / max(0.5, self.cfg.ocr.poll_fps)
             last_seq = -1
@@ -451,6 +503,7 @@ try:
                     end_detected = self._detect_end(frame, t0)
                     self.tracker.expire(t0, end_detected)
                     self.tracker.emit_if_changed()
+                    self._read_dialogue(frame, t0)
                     # Region overlay for the input preview; emit only on change.
                     # All configured regions as outlines + a box per matched text.
                     status = [(r.x, r.y, r.w, r.h, False)
@@ -466,6 +519,12 @@ try:
                         if end_detected:
                             status.extend((x, y, w, h, True)
                                           for x, y, w, h in self._end_boxes)
+                    dlg_region = self.cfg.ocr.regions_dialogue
+                    if dlg_region.is_set() and self.cfg.speech.enabled:
+                        status.append((dlg_region.x, dlg_region.y,
+                                       dlg_region.w, dlg_region.h, False))
+                        status.extend((x, y, w, h, True)
+                                      for x, y, w, h in self._dlg_boxes)
                     status.extend((x, y, w, h, True)
                                   for x, y, w, h in self._match_boxes)
                     if status != self._last_status:

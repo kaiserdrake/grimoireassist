@@ -176,12 +176,16 @@ class _Canvas(QLabel):
 
 
 class CalibrateDialog(QDialog):
-    """Define one or more monster-name regions over a frozen frame (drag to draw,
-    drag the body to move, drag a corner handle to resize)."""
+    """Define the OCR regions over a frozen frame (drag to draw, drag the body to
+    move, drag a corner handle to resize).
+
+    Three kinds, picked from the dropdown: `monster_N` for names matched against
+    the game's monster list, `battle_end` for the end-of-fight banner, and
+    `dialogue` for the text box whose prose is read aloud."""
 
     def __init__(self, cfg: Config, frame_bgr: np.ndarray, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Calibrate monster regions")
+        self.setWindowTitle("Calibrate OCR regions")
         self.cfg = cfg
         self.resize(1000, 640)
 
@@ -193,6 +197,8 @@ class CalibrateDialog(QDialog):
             regions["monster_1"] = Region()
         # optional Battle-End trigger region (e.g. over the "Result" text)
         regions["battle_end"] = Region(**vars(cfg.ocr.regions_battle_end))
+        # optional dialogue region, read as whole sentences and narrated aloud
+        regions["dialogue"] = Region(**vars(cfg.ocr.regions_dialogue))
         self.canvas.set_regions(regions)
 
         self.region_picker = QComboBox()
@@ -263,6 +269,7 @@ class CalibrateDialog(QDialog):
         # update the active regions; the caller persists them under the current game
         self.cfg.ocr.regions_monster_names = slots or [Region()]
         self.cfg.ocr.regions_battle_end = regions.get("battle_end", Region())
+        self.cfg.ocr.regions_dialogue = regions.get("dialogue", Region())
         self.cfg.ocr.keywords_battle_end = [
             s.strip() for s in self.end_text_edit.text().split(",") if s.strip()
         ]

@@ -25,6 +25,8 @@ main CPU cost) — only the detection navbar and the embedded info page.
 - **OBS Virtual Camera** driver — ships with [OBS Studio](https://obsproject.com/). Required only
   for the virtual-camera output.
 - Optional but recommended: an **NVIDIA GPU** (for fast OCR).
+- Optional: an **internet connection** for the online narration voice — dialogue narration falls
+  back to the built-in offline Windows voice without one.
 
 ## Installation
 
@@ -138,6 +140,8 @@ python -m grimoireassist --video samples\clip.mp4     REM test against a recorde
    - **`battle_end`** *(optional)* — the area where end text (e.g. "Result") appears, plus the
      **Battle-End text** field. When that text shows, monster retention drops so the list clears
      promptly after a fight.
+   - **`dialogue`** *(optional)* — the NPC / subtitle text box. Its prose is read as whole
+     sentences and narrated aloud. See [Dialogue narration](#dialogue-narration).
    Click **Save** — regions are stored per game and applied live (no restart).
 4. **Import monster data** via **☰ → Import monster data…** — this populates the monster list used
    for fuzzy matching (without it there's nothing to match detections against) and the in-app
@@ -181,6 +185,22 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
     *Mid and up*, or *High only*. Lower-confidence detections are filtered out.
   - **Auto-start tracking on launch** — start OCR tracking automatically when the app opens
     instead of waiting for the **▶ Start** button. **Off by default.**
+- **Speech** — see [Dialogue narration](#dialogue-narration).
+  - **Speak dialogue** — turn the whole dialogue pipeline on. **Off by default**; while off no
+    dialogue OCR runs at all.
+  - **Mute narration** — silence the voice while still detecting, logging and displaying the text.
+  - **Show dialogue log** — the running transcript strip above the monster cards (newest line
+    first, chevron folds it away).
+  - **Show test line box** — the **Test line** field inside that strip, for narrating typed text
+    without a capture source. **On by default**; turn it off to keep the strip to the transcript
+    alone (`ui.dialogue_test_box`).
+  - **Voice source ▸** — *Automatic* (online, offline fallback), *Online neural voice*, or
+    *Offline Windows voice*.
+  - **Voice ▸** — the voices available from whichever source is active. Filled when you open the
+    submenu, because listing the online voices is a network call.
+  - **Voice speed ▸** — *Slower* … *Faster*.
+  - **Test voice** — speaks one canned sentence. (Stopping mid-line lives on the dialogue
+    strip's **■ Stop** button, next to the transcript it interrupts.)
 - **Game**
   - **Add game…** — add a new game to the catalog (id, name, info-URL template, options).
   - **Switch game…** — reopen the game picker.
@@ -256,6 +276,111 @@ Encoding happens on its own thread and the capture thread never waits on the dis
 can't keep up, frames are dropped instead of stalling capture or the virtual camera. Turn the whole
 thing off with ☰ → *Review* → *Keep rolling capture buffer* (or `review.enabled: false`), which
 costs nothing but also means there is nothing to review.
+
+## Dialogue narration
+
+Reads the game's dialogue box aloud, so side-character chatter and NPC asides land without you
+stopping to read them mid-fight. Unlike monster detection — which matches short names against a
+known list — this region is treated as **prose**: the OCR lines are glued back into whole
+sentences and only spoken once the sentence is finished.
+
+**Setup:** press **F9**, draw the **`dialogue`** region over the text box, Save. Then
+**☰ → Speech → Speak dialogue**. It is off by default, and while off no dialogue OCR runs at all,
+so the feature costs nothing when unused.
+
+### How a statement is decided
+
+Dialogue types out one character at a time, so the same box reads differently on every poll.
+
+- The text must stop changing for **`stable_frames`** polls (default **2**) before it counts as a
+  finished statement — raise it if half-written sentences get spoken, lower it for snappier delivery.
+- When a settled statement merely **extends** the previous one, only the new tail is spoken, so a
+  long speech is narrated once, in order, instead of restarting from the top each time another
+  clause appears.
+- A box that blinks away and returns with the same line is not re-read within **`repeat_window_s`**
+  (default **25s**).
+- Decoration the OCR reads as text — the blinking ▼ "continue" arrow, button glyphs, box borders —
+  is stripped before speaking, and reads too short or too garbled to be prose (**`min_chars`**) are
+  dropped.
+
+### Voices
+
+| Source | Needs | Sounds like |
+|---|---|---|
+| **Online neural voice** (default) | Internet + `edge-tts` | Microsoft's "Online Natural" voices — `en-GB-RyanNeural`, `en-GB-SoniaNeural` and ~20 more |
+| **Offline Windows voice** | Nothing | Whatever SAPI voices are installed (typically *Microsoft David* / *Zira*) |
+
+Both lists are filtered to **US and UK English** — other locales read game dialogue with the
+wrong vowels and pacing. If a machine has no US/UK voice installed at all, the offline list
+falls back to every installed voice rather than going silent.
+
+On the default **Automatic** setting the online voice is used whenever it works. If synthesis
+fails — no network, endpoint unreachable — **the same statement is immediately spoken by the
+offline voice rather than being lost**, the source is noted in the status bar and the dialogue
+log, and the network is re-probed every `speech.edge_retry_s` (default 60s) so the good voice
+returns on its own. Pin either source explicitly via **☰ → Speech → Voice source**.
+
+> **The online voice sends text off your machine.** Each dialogue line is posted to a Microsoft
+> speech endpoint to be synthesised. If that isn't acceptable, set the voice source to
+> **Offline Windows voice** (or `speech.backend: sapi`) — everything then stays local.
+
+Because synthesis is a network round-trip (~0.5–1.5s), the next queued statement is synthesised
+while the current one is still playing, which hides most of that delay.
+
+**A note on Narrator "natural" voices:** voices installed through *Settings → Accessibility →
+Narrator → Add natural voices* (Sonia, Ryan and friends) are **not** usable by other applications
+— they appear in neither the SAPI voice list nor the WinRT synthesiser, only inside Narrator.
+That is why the good voices here come over the network instead. To improve the *offline* fallback,
+install proper SAPI voices (e.g. the Microsoft Speech Platform runtime voices); any US or UK
+English voice that shows up under Windows Speech settings appears in the **Voice** submenu.
+
+### Trying it without a game running
+
+Three ways to test narration with fixed input rather than a live capture card:
+
+| Want to | Do this |
+|---|---|
+| Hear a **line again** | Click it in the transcript, then **↻ Replay** (or just double-click it). |
+| Hear a **specific line** | **☰ → Speech → Show dialogue log**, type into **Test line** at the bottom of the strip, press Enter. Hide the box with **Show test line box** when you no longer want it. The text goes through the same cleaning a real read gets — paste in a line with its ▼ arrow and watch it drop out — then it is logged, displayed and spoken. Needs no capture source and no calibrated region. |
+| Check the **voice** only | **☰ → Speech → Test voice** — speaks one canned sentence. |
+| Exercise the **whole pipeline** (OCR included) | `python -m grimoireassist --video samples\clip.mp4` — runs against a recorded clip, so region calibration, statement settling and narration all work exactly as they would live. |
+
+A line the reader considers too fragmentary to be prose is refused with the reason in the status
+bar and left in the box so you can edit it, rather than being narrated as noise.
+
+### The dialogue log
+
+**☰ → Speech → Show dialogue log** docks a running transcript **above** the monster cards, in
+the tracking view's own colours. The **newest line sits at the top**, so the line just spoken is
+always against the top edge — glanceable mid-fight without chasing a scrollbar.
+
+Each entry is banded against its neighbours so adjacent lines never run together, and carries a
+`[HH:MM:SS]` timestamp set in a smaller, dimmer type than the prose it belongs to. The banding
+follows the entry itself, so a line keeps its shade as newer statements push it down.
+
+**Click any line to pick it** — it highlights — then **↻ Replay** speaks it again; double-clicking
+a line replays it in one go. Clicking the picked line again unpicks it. Handy when a line was
+drowned out by a fight, or you want to hear an NPC's hint a second time. Replay honours Mute: with
+narration muted it says so in the status bar rather than silently doing nothing.
+
+**Drag the grip along the bottom edge** to resize the box (56–600px); the height is written to
+`ui.dialogue_height` on release, so it survives restarts.
+
+Its header carries **■ Stop** (cut the line being spoken and drop the queue), **↻ Replay**, the
+**🔊 / 🔇 Mute** toggle, **Clear**, and a **▲ / ▼ chevron** that folds the strip down to just that
+header (the same gesture as the controller map overlay; remembered as `ui.dialogue_collapsed`).
+
+Mute is deliberately *not* the same switch as *Speak dialogue*:
+
+| | dialogue OCR | log + panel | audio |
+|---|---|---|---|
+| *Speak dialogue* off | no | no | no |
+| *Speak dialogue* on, **muted** | yes | yes | no |
+| *Speak dialogue* on, unmuted | yes | yes | yes |
+
+Muting also cuts the line currently being spoken rather than letting it finish. Statements are
+additionally written to the OCR debug log tagged `[dialogue · <source>]`, so you can see which
+voice actually spoke each line.
 
 ## Detection behaviour
 
@@ -350,6 +475,9 @@ ui:
   controller_map_x: 0.5            # position as a 0–1 share of the free space,
   controller_map_y: 0.08           # so a resized window keeps it in proportion
   controller_map_collapsed: false  # folded down to the header pill
+  dialogue_collapsed: false        # dialogue strip folded down to its header
+  dialogue_test_box: true          # the type-a-line box inside the dialogue log
+  dialogue_height: 132             # transcript height in px; drag its bottom grip
 review:                            # rolling capture buffer behind the review screen
   enabled: true
   minutes: 30.0                    # length of the rolling window
@@ -357,6 +485,19 @@ review:                            # rolling capture buffer behind the review sc
   max_height: 720                  # downscale taller sources to this (0 = keep as captured)
   jpeg_quality: 75                 # 30–95; higher is bigger on disk
   max_disk_mb: 4096                # hard ceiling on buffer/ — whichever budget binds first wins
+speech:                            # dialogue narration (see Dialogue narration)
+  enabled: false                   # off = no dialogue OCR at all
+  muted: false                     # detect + log, but stay silent
+  backend: auto                    # auto (online, offline fallback) | edge | sapi
+  voice_online: en-GB-RyanNeural   # edge-tts voice name
+  voice_offline: ''                # SAPI voice, matched as a substring; '' = auto-pick
+  rate: 0                          # -10 (slow) … 10 (fast)
+  volume: 90                       # 0–100
+  stable_frames: 2                 # identical reads before a statement counts as finished
+  min_chars: 6                     # shorter reads are treated as OCR fragments
+  repeat_window_s: 25.0            # don't re-read the same statement within this
+  max_queue: 3                     # statements buffered when speech falls behind
+  edge_retry_s: 60.0               # how long to stay offline before re-probing the network
 grimoire:                          # source of the browser drawer's bookmarks
   base_url: https://grimoire.laeradsphere.com
   user: ''                         # ☰ → Browser → Grimoire user…; blank = no bookmarks
@@ -379,7 +520,11 @@ in `config.yaml`:
 
 ```json
 {
-  "regions": { "monster_names": [ {"x":0,"y":0,"w":0,"h":0} ], "battle_end": {"x":0,"y":0,"w":0,"h":0} },
+  "regions": {
+    "monster_names": [ {"x":0,"y":0,"w":0,"h":0} ],
+    "battle_end": {"x":0,"y":0,"w":0,"h":0},
+    "dialogue": {"x":0,"y":0,"w":0,"h":0}
+  },
   "keywords": { "battle_end": ["result", "victory", "defeat"] },
   "monster_persist_s": 12.0,
   "monster_persist_end_s": 1.0
@@ -418,6 +563,8 @@ grimoireassist/
   games.py         game catalog (GameInfo) loader + import-data helpers + app icon
   ocr/             OcrEngine + EasyOCR/Tesseract impls (confidence) + preprocessing + level helpers
   battle.py        MonsterTracker (persistent + confidence) + match_known + OcrWorker (QThread)
+  dialogue.py      dialogue-region prose: sentence assembly + when a statement is finished
+  speech.py        text-to-speech: online neural + offline SAPI backends, queue, auto-fallback
   overlay.py       OverlayModel (UI state)
   data/            app icon (icon.ico)
   ui/              main window (☰ menu, pills, view switch), monster panel (web views),
@@ -431,6 +578,7 @@ games/
   <id>/settings.json    per-game regions + keywords + persist overrides
   <id>/import/          imported monster data.json + images/
 logs/                   OCR debug logs (only when ☰ → Log to file is on)
+cache/tts/              scratch MP3s for the online narration voice (deleted after playback)
 snapshots/              frame snapshots saved by the snapshot hotkey (☰ → Snapshot frame)
 buffer/                 rolling review buffer (a cache — wiped on exit and on the next start)
 recordings/             clips saved from the review screen (these are yours; nothing deletes them)
@@ -447,6 +595,9 @@ pytest
 Covers the persistent tracker (retention, confidence stickiness, UI-text rejection), the URL
 builder (path/search styles, multi-monster encoding, custom joiner), the game catalog/config,
 config round-tripping, the rolling review buffer (fps decimation, time/size eviction, segment
-cleanup, snapshot pinning, clip export + cancel) and the review screen (playback clock at each
-speed, scrubbing, save, close) — no camera required. The review-screen tests drive Qt's
-**offscreen** platform, so they need no display either.
+cleanup, snapshot pinning, clip export + cancel), the review screen (playback clock at each
+speed, scrubbing, save, close), dialogue statement assembly (reading order, typed-out lines,
+blink suppression, noise stripping) and narration voice selection + the online→offline
+fallback — no camera required. The review-screen tests drive Qt's **offscreen** platform, so
+they need no display either; the speech tests use fake backends, so they make no sound and
+need no network.

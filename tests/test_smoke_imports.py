@@ -13,6 +13,7 @@ def test_config_roundtrip(tmp_path):
     cfg.set_regions_for("mhs3", GameSettings(
         monster_names=[Region(10, 20, 100, 40)],
         battle_end=Region(5, 5, 50, 20),
+        dialogue=Region(40, 800, 900, 160),
         end_keywords=["result"],
     ))
     cfg.save(p)
@@ -21,8 +22,33 @@ def test_config_roundtrip(tmp_path):
     gs = again.regions_for("mhs3")
     assert gs.monster_names[0].w == 100
     assert gs.battle_end.w == 50
+    assert gs.dialogue.w == 900 and gs.dialogue.y == 800
     assert gs.end_keywords == ["result"]
     assert again.ocr.continuous is True
+
+
+def test_speech_settings_roundtrip(tmp_path):
+    p = tmp_path / "config.yaml"
+    cfg = Config()
+    cfg.speech.enabled = True
+    cfg.speech.muted = True
+    cfg.speech.backend = "sapi"
+    cfg.speech.voice_online = "en-GB-SoniaNeural"
+    cfg.speech.voice_offline = "zira"
+    cfg.speech.rate = -2
+    cfg.save(p)
+    again = Config.load(p)
+    assert again.speech.enabled and again.speech.muted
+    assert again.speech.backend == "sapi"
+    assert again.speech.voice_online == "en-GB-SoniaNeural"
+    assert again.speech.voice_offline == "zira"
+    assert again.speech.rate == -2
+
+
+def test_unknown_speech_backend_falls_back_to_auto(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("speech:\n  backend: carrier-pigeon\n", encoding="utf-8")
+    assert Config.load(p).speech.backend == "auto"
 
 
 def test_config_migrates_single_game(tmp_path):

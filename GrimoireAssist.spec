@@ -12,6 +12,9 @@ hiddenimports = collect_submodules("easyocr") + [
     "pygrabber",
     "pygrabber.dshow_graph",
 ]
+# speech.py imports its backends lazily, by name, so neither is visible to
+# static analysis: edge_tts drives the online voice, comtypes the offline one.
+hiddenimports += collect_submodules("edge_tts") + ["comtypes", "comtypes.client"]
 
 a = Analysis(
     ["launcher.py"],

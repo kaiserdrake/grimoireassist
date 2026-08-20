@@ -28,6 +28,12 @@ def _clamp01(value) -> float:
         return 0.0
 
 
+def _speech_backend(value) -> str:
+    """Normalise speech.backend to a key speech.py knows (see SPEECH_BACKENDS)."""
+    key = str(value or "").strip().lower()
+    return key if key in SPEECH_BACKENDS else "auto"
+
+
 def _pad_id(value, fallback: str) -> str:
     """Normalise a configured controller id to one the overlay knows about.
     `ui.controllers` is Qt-free, so this import stays headless-safe."""
@@ -82,6 +88,7 @@ class OcrConfig:
     # active per-game values (populated at runtime, not serialized here)
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
     regions_battle_end: Region = field(default_factory=Region)
+    regions_dialogue: Region = field(default_factory=Region)
     keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
 
     def gpu_effective(self) -> bool:
@@ -98,9 +105,11 @@ class OcrConfig:
 @dataclass
 class GameSettings:
     """Per-game OCR layout: the monster name region(s), an optional Battle-End
-    trigger region, and the keyword text that marks the battle end."""
+    trigger region, the keyword text that marks the battle end, and an optional
+    dialogue region whose prose is read aloud (see speech.py)."""
     monster_names: List[Region] = field(default_factory=lambda: [Region()])
     battle_end: Region = field(default_factory=Region)
+    dialogue: Region = field(default_factory=Region)
     end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
     monster_persist_s: Optional[float] = None       # overrides ocr.monster_persist_s when set
     monster_persist_end_s: Optional[float] = None   # overrides ocr.monster_persist_end_s when set
@@ -126,6 +135,9 @@ class UiConfig:
     controller_map_x: float = 0.5       # position as a 0..1 share of the free space,
     controller_map_y: float = 0.08      # so a resized window keeps it in proportion
     controller_map_collapsed: bool = False  # folded down to the header pill
+    dialogue_collapsed: bool = False    # dialogue strip folded down to its header
+    dialogue_test_box: bool = True      # the type-a-line box inside the dialogue log
+    dialogue_height: int = 132          # transcript height in px; drag its bottom grip
 
 
 @dataclass
@@ -143,6 +155,40 @@ class ReviewConfig:
     max_height: int = 720          # downscale tall sources to this (0 = keep as-is)
     jpeg_quality: int = 75         # 30..95
     max_disk_mb: int = 4096        # ceiling on the buffer directory
+
+
+SPEECH_BACKENDS = ("auto", "edge", "sapi")
+
+
+@dataclass
+class SpeechConfig:
+    """Reading the dialogue region aloud (see speech.py).
+
+    `backend` picks the synthesiser: "edge" for the online neural voices,
+    "sapi" for the offline Windows ones, "auto" (the default) for online with an
+    automatic fall back to offline whenever the network isn't there. The two
+    have separate voice namespaces, hence the two voice fields.
+
+    `enabled` gates the whole dialogue pipeline — with it off no dialogue OCR
+    runs at all. `muted` is the softer switch: statements are still read and
+    logged, only the audio is suppressed.
+
+    `stable_frames` is how many consecutive identical reads mark a typed-out
+    line as finished — raise it if half-written sentences get spoken, lower it
+    for snappier delivery.
+    """
+    enabled: bool = False
+    muted: bool = False
+    backend: str = "auto"                     # auto | edge | sapi
+    voice_online: str = "en-GB-RyanNeural"    # edge-tts voice name
+    voice_offline: str = ""                   # SAPI description substring; "" = auto-pick
+    rate: int = 0                   # -10 (slow) .. 10 (fast)
+    volume: int = 90                # 0..100
+    stable_frames: int = 2          # identical reads before a statement counts as done
+    min_chars: int = 6              # shorter reads are treated as OCR fragments
+    repeat_window_s: float = 25.0   # don't re-read the same statement within this
+    max_queue: int = 3              # statements buffered when speech falls behind
+    edge_retry_s: float = 60.0      # how long to stay offline before re-probing the network
 
 
 @dataclass
@@ -185,6 +231,7 @@ def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
         return GameSettings(
             monster_names=[_region(r) for r in mons],
             battle_end=_region(regions.get("battle_end")),
+            dialogue=_region(regions.get("dialogue")),
             end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
             monster_persist_s=float(raw_p) if raw_p is not None else None,
             monster_persist_end_s=float(raw_pe) if raw_pe is not None else None,
@@ -201,6 +248,7 @@ def _save_game_settings(path: "Path", gs: "GameSettings") -> None:
         "regions": {
             "monster_names": [asdict(r) for r in gs.monster_names],
             "battle_end": asdict(gs.battle_end),
+            "dialogue": asdict(gs.dialogue),
         },
         "keywords": {
             "battle_end": gs.end_keywords,
@@ -227,6 +275,7 @@ class Config:
     monster_name_list: List[str] = field(default_factory=list)  # active list
     ui: UiConfig = field(default_factory=UiConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    speech: SpeechConfig = field(default_factory=SpeechConfig)
     grimoire: GrimoireConfig = field(default_factory=GrimoireConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     selected_game: Optional[str] = None
@@ -297,6 +346,7 @@ class Config:
         ocr = raw.get("ocr", {})
         ui = raw.get("ui", {})
         rev = raw.get("review", {})
+        spk = raw.get("speech", {}) or {}
         grim = raw.get("grimoire", {}) or {}
         log = raw.get("logging", {})
 
@@ -312,6 +362,7 @@ class Config:
             games[gid] = GameSettings(
                 monster_names=[_region(r) for r in mons],
                 battle_end=_region(regions.get("battle_end")),
+                dialogue=_region(regions.get("dialogue")),
                 end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
                 monster_persist_s=float(raw_persist) if raw_persist is not None else None,
                 monster_persist_end_s=float(raw_persist_end) if raw_persist_end is not None else None,
@@ -360,6 +411,9 @@ class Config:
                 controller_map_y=_clamp01(ui.get("controller_map_y", 0.08)),
                 controller_map_collapsed=bool(
                     ui.get("controller_map_collapsed", False)),
+                dialogue_collapsed=bool(ui.get("dialogue_collapsed", False)),
+                dialogue_test_box=bool(ui.get("dialogue_test_box", True)),
+                dialogue_height=max(1, int(ui.get("dialogue_height", 132))),
             ),
             review=ReviewConfig(
                 enabled=bool(rev.get("enabled", True)),
@@ -368,6 +422,21 @@ class Config:
                 max_height=max(0, int(rev.get("max_height", 720))),
                 jpeg_quality=min(max(int(rev.get("jpeg_quality", 75)), 30), 95),
                 max_disk_mb=max(64, int(rev.get("max_disk_mb", 4096))),
+            ),
+            speech=SpeechConfig(
+                enabled=bool(spk.get("enabled", False)),
+                muted=bool(spk.get("muted", False)),
+                backend=_speech_backend(spk.get("backend", "auto")),
+                voice_online=str(
+                    spk.get("voice_online", "en-GB-RyanNeural") or "").strip(),
+                voice_offline=str(spk.get("voice_offline", "") or "").strip(),
+                rate=min(max(int(spk.get("rate", 0)), -10), 10),
+                volume=min(max(int(spk.get("volume", 90)), 0), 100),
+                stable_frames=max(1, int(spk.get("stable_frames", 2))),
+                min_chars=max(1, int(spk.get("min_chars", 6))),
+                repeat_window_s=max(0.0, float(spk.get("repeat_window_s", 25.0))),
+                max_queue=max(1, int(spk.get("max_queue", 3))),
+                edge_retry_s=max(5.0, float(spk.get("edge_retry_s", 60.0))),
             ),
             grimoire=GrimoireConfig(
                 base_url=str(grim.get(
@@ -453,6 +522,9 @@ class Config:
                 "controller_map_x": self.ui.controller_map_x,
                 "controller_map_y": self.ui.controller_map_y,
                 "controller_map_collapsed": self.ui.controller_map_collapsed,
+                "dialogue_collapsed": self.ui.dialogue_collapsed,
+                "dialogue_test_box": self.ui.dialogue_test_box,
+                "dialogue_height": self.ui.dialogue_height,
             },
             "review": {
                 "enabled": self.review.enabled,
@@ -461,6 +533,20 @@ class Config:
                 "max_height": self.review.max_height,
                 "jpeg_quality": self.review.jpeg_quality,
                 "max_disk_mb": self.review.max_disk_mb,
+            },
+            "speech": {
+                "enabled": self.speech.enabled,
+                "muted": self.speech.muted,
+                "backend": self.speech.backend,
+                "voice_online": self.speech.voice_online,
+                "voice_offline": self.speech.voice_offline,
+                "rate": self.speech.rate,
+                "volume": self.speech.volume,
+                "stable_frames": self.speech.stable_frames,
+                "min_chars": self.speech.min_chars,
+                "repeat_window_s": self.speech.repeat_window_s,
+                "max_queue": self.speech.max_queue,
+                "edge_retry_s": self.speech.edge_retry_s,
             },
             "grimoire": {
                 "base_url": self.grimoire.base_url,

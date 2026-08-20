@@ -4,20 +4,23 @@ Camera, calibration, always-on-top and game switching live behind a burger menu.
 """
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
-from typing import List, Optional
+from typing import Deque, List, Optional, Tuple
 
+import html
 import re
 import threading
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import (
-    QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence, QShortcut,
+    QAction, QActionGroup, QColor, QGuiApplication, QIcon, QKeySequence,
+    QPainter, QPen, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QToolBar,
-    QToolButton, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTextEdit,
+    QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
@@ -33,6 +36,7 @@ from ..hotkey import GlobalHotkey
 from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..reviewbuffer import RollingRecorder
+from ..speech import BACKENDS, EdgeNeuralBackend, Speaker
 from ..virtualcam import VirtualCamSink
 from .browser import BrowserPanel, SEARCH_ENGINES
 from .calibrate import CalibrateDialog
@@ -45,8 +49,116 @@ from .preview import InputPreview
 from .review import ReviewOverlay
 
 
+# The tracking view's surface (see MonsterPanel). The dialogue strip borrows it
+# so it reads as part of that view rather than as a separate debug console.
+_TRACKING_BG = "#15151b"
+_TRACKING_FG = "#e8e8ec"
+
+# Dialogue transcript styling. Entries alternate between these two backgrounds so
+# neighbouring lines never run together — banding is keyed to each entry's own
+# sequence number, not its position, so an entry keeps its shade when newer lines
+# push it down.
+_DIALOGUE_ROWS = ("#15151b", "#1c1c26")
+_DIALOGUE_STAMP = "#7f7f93"      # timestamp: present but never competing with the prose
+_DIALOGUE_SELECTED = "#33335a"   # the picked line, for replaying it
+_DIALOGUE_MAX_LINES = 200
+
+
+_DIALOGUE_MIN_H = 56       # below this the transcript shows less than two lines
+_DIALOGUE_MAX_H = 600
+_DIALOGUE_GRIP_H = 7
+
+
+class _DialogueGrip(QWidget):
+    """Drag handle along the bottom of the transcript.
+
+    Follows the same contract as the PiP's grip: the height is reported live
+    while dragging, and once more on release so the host can persist it without
+    writing config on every mouse move."""
+
+    resized = pyqtSignal(int)     # live, during the drag
+    committed = pyqtSignal(int)   # once, on release
+
+    def __init__(self, target: QWidget, parent=None) -> None:
+        super().__init__(parent)
+        self._target = target
+        self._start_y = 0
+        self._start_h = 0
+        self._dragging = False
+        self.setFixedHeight(_DIALOGUE_GRIP_H)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("Drag to resize the dialogue box")
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._start_y = ev.globalPosition().toPoint().y()
+            self._start_h = self._target.height()
+
+    def mouseMoveEvent(self, ev) -> None:
+        if not self._dragging:
+            return
+        delta = ev.globalPosition().toPoint().y() - self._start_y
+        height = min(max(self._start_h + delta, _DIALOGUE_MIN_H), _DIALOGUE_MAX_H)
+        self._target.setFixedHeight(height)
+        self.resized.emit(height)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._dragging:
+            self._dragging = False
+            self.committed.emit(self._target.height())
+
+    def paintEvent(self, _ev) -> None:
+        """Two short rules in the middle — a grab handle, not a border."""
+        p = QPainter(self)
+        p.setPen(QPen(QColor("#4a4a5e"), 1.0))
+        mid_x, mid_y = self.width() // 2, self.height() // 2
+        for offset in (-1, 1):
+            p.drawLine(mid_x - 14, mid_y + offset, mid_x + 14, mid_y + offset)
+        p.end()
+
+
+class _DialogueLog(QTextEdit):
+    """Transcript view whose rows can be picked.
+
+    Every row is wrapped in an anchor carrying its entry's sequence number, so a
+    click maps to an exact entry via `anchorAt` — hit-testing by cursor position
+    would depend on how Qt happens to lay the HTML out in blocks."""
+
+    entry_clicked = pyqtSignal(int)
+    entry_activated = pyqtSignal(int)   # double-click: pick and replay in one go
+
+    def _entry_at(self, pos) -> Optional[int]:
+        anchor = self.anchorAt(pos)
+        if not anchor:
+            return None
+        try:
+            return int(anchor)
+        except ValueError:
+            return None
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        seq = self._entry_at(event.pos())
+        if seq is not None:
+            self.entry_clicked.emit(seq)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        super().mouseDoubleClickEvent(event)
+        seq = self._entry_at(event.pos())
+        if seq is not None:
+            self.entry_activated.emit(seq)
+
+
 class MainWindow(QMainWindow):
     _camera_scan_done = pyqtSignal(list)
+    # Model pre-loading runs on a plain thread, which has no Qt event loop —
+    # a QTimer posted from there would never fire. Signals queue to the
+    # receiver's thread, so the status message actually arrives.
+    _warmup_status = pyqtSignal(str, int)
+    # Speech runs on its own thread; these carry its messages to the UI thread.
+    _speech_error = pyqtSignal(str)
+    _speech_backend_changed = pyqtSignal(str, str)
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -77,6 +189,14 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
         self._debug_widget = self._build_debug_panel()
         self._debug_widget.setVisible(False)
+        # Transcript entries as (sequence, timestamp, text), newest first. Held
+        # apart from the widget so the log can be re-rendered with stable banding.
+        self._dialogue_entries: Deque[Tuple[int, str, str]] = deque(
+            maxlen=_DIALOGUE_MAX_LINES)
+        self._dialogue_seq = 0
+        self._dialogue_selected: Optional[int] = None   # picked entry's sequence
+        self._dialogue_widget = self._build_dialogue_panel()
+        self._dialogue_widget.setVisible(False)
 
         # Permanent central splitter: [main view host | browser drawer].
         # _start_game only swaps the child of _main_host, so the browser
@@ -135,6 +255,15 @@ class MainWindow(QMainWindow):
         # _set_grimoire(False) at the end of __init__ turns it visible.
         self._sync_controller_map_buttons()
 
+        # Dialogue narration. The speaker owns a thread and (for the offline
+        # voice) a COM object, so it is only built once the feature is switched
+        # on. Its callbacks fire on the TTS thread — hence the signals.
+        self.speaker: Optional[Speaker] = None
+        self._speech_error.connect(self._on_speech_error)
+        self._speech_backend_changed.connect(self._on_speech_backend_changed)
+        if cfg.speech.enabled:
+            self._ensure_speaker()
+
         # Rolling review buffer: the last N minutes of capture, kept on disk and
         # replayed by the review screen. Started before capture so the frame sink
         # has somewhere to put the very first frame.
@@ -159,6 +288,8 @@ class MainWindow(QMainWindow):
 
         # Pre-warm the OCR engine in the background so the first Start click is
         # instant. The button is disabled until the model finishes loading.
+        self._warmup_status.connect(
+            lambda msg, ms: self.statusBar().showMessage(msg, ms))
         self._start_warmup()
 
         # camera-health tracking (drives the error status)
@@ -207,6 +338,7 @@ class MainWindow(QMainWindow):
         gs = self.cfg.regions_for(game.id)
         self.cfg.ocr.regions_monster_names = gs.monster_names
         self.cfg.ocr.regions_battle_end = gs.battle_end
+        self.cfg.ocr.regions_dialogue = gs.dialogue
         self.cfg.ocr.keywords_battle_end = gs.end_keywords
         self.cfg.save()
         self.setWindowTitle(f"GrimoireAssist {__version__} — {game.name}")
@@ -228,6 +360,7 @@ class MainWindow(QMainWindow):
         wlay = QVBoxLayout(wrapper)
         wlay.setContentsMargins(0, 0, 0, 0)
         wlay.setSpacing(0)
+        wlay.addWidget(self._dialogue_widget)
         wlay.addWidget(self.panel, 1)
         wlay.addWidget(self._debug_widget)
         self._set_main_widget(wrapper)
@@ -305,6 +438,7 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self._on_ocr_error)
         self.worker.debug_text.connect(self._on_debug_text)
         self.worker.region_status.connect(self._preview.set_region_status)
+        self.worker.dialogue_text.connect(self._on_dialogue_text)
         self.worker.start()
 
     def _stop_worker(self) -> None:
@@ -325,6 +459,9 @@ class MainWindow(QMainWindow):
         end = self.cfg.ocr.regions_battle_end
         if end.is_set():
             rects.append((end.x, end.y, end.w, end.h, False))
+        dialogue = self.cfg.ocr.regions_dialogue
+        if dialogue.is_set():
+            rects.append((dialogue.x, dialogue.y, dialogue.w, dialogue.h, False))
         self._preview.set_region_status(rects)
 
     def _toggle_tracking(self) -> None:
@@ -585,6 +722,61 @@ class MainWindow(QMainWindow):
         self.act_auto_track.setChecked(self.cfg.ui.auto_start_tracking)
         self.act_auto_track.toggled.connect(self._toggle_auto_start_tracking)
 
+        # ── Speech ───────────────────────────────────────────────
+        self.menu.addSection("Speech")
+        self.act_speech = self.menu.addAction("Speak dialogue")
+        self.act_speech.setCheckable(True)
+        self.act_speech.setChecked(self.cfg.speech.enabled)
+        self.act_speech.setToolTip(
+            "Read the dialogue region aloud (set the region with Calibrate regions)")
+        self.act_speech.toggled.connect(self._toggle_speech)
+        self.act_mute = self.menu.addAction("Mute narration")
+        self.act_mute.setCheckable(True)
+        self.act_mute.setChecked(self.cfg.speech.muted)
+        self.act_mute.setToolTip("Silence the voice; keep detecting and logging")
+        self.act_mute.toggled.connect(self._set_muted)
+        self.act_dialogue_log = self.menu.addAction("Show dialogue log")
+        self.act_dialogue_log.setCheckable(True)
+        self.act_dialogue_log.setChecked(False)
+        self.act_dialogue_log.toggled.connect(self._toggle_dialogue_panel)
+        self.act_test_box = self.menu.addAction("Show test line box")
+        self.act_test_box.setCheckable(True)
+        self.act_test_box.setChecked(self.cfg.ui.dialogue_test_box)
+        self.act_test_box.setToolTip(
+            "The type-a-line box inside the dialogue log")
+        self.act_test_box.toggled.connect(self._toggle_dialogue_test_box)
+        backend_menu = self.menu.addMenu("Voice source")
+        backend_group = QActionGroup(backend_menu)
+        backend_group.setExclusive(True)
+        _online_ok = EdgeNeuralBackend.available()
+        for key, label in (("auto", "Automatic (online, offline fallback)"),
+                           ("edge", "Online neural voice"),
+                           ("sapi", "Offline Windows voice")):
+            act = QAction(label, backend_menu)
+            act.setCheckable(True)
+            act.setChecked(self.cfg.speech.backend == key)
+            if key in ("auto", "edge") and not _online_ok:
+                act.setEnabled(False)
+                act.setToolTip("edge-tts is not installed — offline voice only")
+            act.triggered.connect(lambda _c, k=key: self._set_speech_backend(k))
+            backend_group.addAction(act)
+            backend_menu.addAction(act)
+        # Populated on open: listing the online voices is a network call.
+        self.voice_menu = self.menu.addMenu("Voice")
+        self.voice_menu.aboutToShow.connect(self._populate_voice_menu)
+        rate_menu = self.menu.addMenu("Voice speed")
+        rate_group = QActionGroup(rate_menu)
+        rate_group.setExclusive(True)
+        for value, label in ((-4, "Slower"), (-2, "Slow"), (0, "Normal"),
+                             (2, "Fast"), (4, "Faster")):
+            act = QAction(label, rate_menu)
+            act.setCheckable(True)
+            act.setChecked(self.cfg.speech.rate == value)
+            act.triggered.connect(lambda _c, v=value: self._set_speech_rate(v))
+            rate_group.addAction(act)
+            rate_menu.addAction(act)
+        self.menu.addAction("Test voice", self._test_voice)
+
         # ── Game ─────────────────────────────────────────────────
         self.menu.addSection("Game")
         self.menu.addAction("Add game…", self._add_game)
@@ -735,11 +927,13 @@ class MainWindow(QMainWindow):
             try:
                 self.engine.warmup()
             except Exception as exc:
-                QTimer.singleShot(0, lambda: self.statusBar().showMessage(
-                    f"{engine_name} model load failed: {exc}", 6000))
+                # Format the message here rather than inside the emit: Python
+                # unbinds `exc` at the end of the except block, so anything that
+                # reads it later sees nothing at all.
+                self._warmup_status.emit(
+                    f"{engine_name} model load failed: {exc}", 6000)
                 return
-            QTimer.singleShot(0, lambda: self.statusBar().showMessage(
-                f"{engine_name} model ready", 3000))
+            self._warmup_status.emit(f"{engine_name} model ready", 3000)
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -924,6 +1118,143 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._debug_log)
         return container
 
+    def _build_dialogue_panel(self) -> QWidget:
+        """Running transcript of the dialogue region: header strip + body.
+
+        Sits at the TOP of the main pane and reads newest-line-first, so the line
+        just spoken is always against the top edge — glanceable mid-fight without
+        scrolling or hunting. Painted in the tracking view's colours so it reads
+        as part of that surface rather than as a debug console.
+
+        The chevron folds it down to the header strip, matching the controller
+        map overlay; Mute is deliberately not the same switch as "Speak
+        dialogue" (that one stops the OCR entirely, this only silences audio).
+        """
+        from PyQt6.QtWidgets import QHBoxLayout
+
+        container = QWidget()
+        container.setStyleSheet(
+            "QWidget { background:%s; color:%s; }" % (_TRACKING_BG, _TRACKING_FG))
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(4)
+
+        _btn_style = (
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }"
+            "QPushButton:checked { background:#5a2a2a; color:#ffb0b0; }")
+
+        # ── Header strip: stays visible when collapsed ──────────────────
+        row = QWidget()
+        rlay = QHBoxLayout(row)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel("Dialogue")
+        lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
+        rlay.addWidget(lbl)
+        self._dialogue_backend_lbl = QLabel("")
+        self._dialogue_backend_lbl.setStyleSheet("color:#5a5a6a; font-size:10px;")
+        rlay.addWidget(self._dialogue_backend_lbl)
+        rlay.addStretch()
+
+        self.stop_btn = QPushButton("■ Stop")
+        self.stop_btn.setFixedWidth(62)
+        self.stop_btn.setStyleSheet(_btn_style)
+        self.stop_btn.setToolTip("Stop the line being spoken and drop what's queued")
+        self.stop_btn.clicked.connect(self._stop_speaking)
+        rlay.addWidget(self.stop_btn)
+
+        self.replay_btn = QPushButton("↻ Replay")
+        self.replay_btn.setFixedWidth(74)
+        self.replay_btn.setStyleSheet(_btn_style)
+        self.replay_btn.setEnabled(False)     # nothing picked yet
+        self.replay_btn.setToolTip("Click a line to pick it, then replay it")
+        self.replay_btn.clicked.connect(self._replay_selected)
+        rlay.addWidget(self.replay_btn)
+
+        self.mute_btn = QPushButton()
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setFixedWidth(74)
+        self.mute_btn.setStyleSheet(_btn_style)
+        self.mute_btn.setChecked(self.cfg.speech.muted)
+        self.mute_btn.toggled.connect(self._set_muted)
+        self._update_mute_btn()
+        rlay.addWidget(self.mute_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(54)
+        clear_btn.setStyleSheet(_btn_style)
+        rlay.addWidget(clear_btn)
+        # Chevron: up while expanded (click folds), down while collapsed —
+        # the same gesture and glyphs as the controller map overlay.
+        self.dialogue_fold_btn = QPushButton()
+        self.dialogue_fold_btn.setFixedWidth(26)
+        self.dialogue_fold_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#8a8a99; border:none;"
+            " font-size:12px; padding:2px 4px; }"
+            "QPushButton:hover { color:#e8e8ec; }")
+        self.dialogue_fold_btn.clicked.connect(
+            lambda: self._set_dialogue_collapsed(not self.cfg.ui.dialogue_collapsed))
+        rlay.addWidget(self.dialogue_fold_btn)
+        lay.addWidget(row)
+
+        # ── Body: everything the chevron folds away ─────────────────────
+        self._dialogue_body = QWidget()
+        blay = QVBoxLayout(self._dialogue_body)
+        blay.setContentsMargins(0, 0, 0, 0)
+        blay.setSpacing(4)
+
+        # Rich text, not plain: each entry carries its own banding and a
+        # timestamp styled apart from the prose it belongs to.
+        self._dialogue_log = _DialogueLog()
+        self._dialogue_log.setReadOnly(True)
+        self._dialogue_log.setStyleSheet(
+            "QTextEdit { background:%s; color:%s;"
+            " border:none; }" % (_TRACKING_BG, _TRACKING_FG))
+        self._dialogue_log.setFixedHeight(
+            min(max(self.cfg.ui.dialogue_height, _DIALOGUE_MIN_H), _DIALOGUE_MAX_H))
+        self._dialogue_log.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._dialogue_log.entry_clicked.connect(self._select_dialogue_entry)
+        self._dialogue_log.entry_activated.connect(self._replay_entry)
+        clear_btn.clicked.connect(self._clear_dialogue_log)
+        blay.addWidget(self._dialogue_log)
+
+        # ── Type a line and hear it ─────────────────────────────────────
+        # The counterpart to the debug panel's "Test OCR" box: narration can be
+        # tried without a capture source, a game, or a calibrated region.
+        test_row = QWidget()
+        tlay = QHBoxLayout(test_row)
+        tlay.setContentsMargins(0, 0, 0, 0)
+        tlay.setSpacing(6)
+        test_lbl = QLabel("Test line:")
+        test_lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
+        tlay.addWidget(test_lbl)
+        self._dialogue_input = QLineEdit()
+        self._dialogue_input.setPlaceholderText(
+            "Type a dialogue line to hear it read back…")
+        self._dialogue_input.setStyleSheet(
+            "QLineEdit { background:#1e1e28; color:#e8e8ec; border:1px solid #2a2a36;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }")
+        self._dialogue_input.returnPressed.connect(self._inject_dialogue)
+        tlay.addWidget(self._dialogue_input, 1)
+        speak_btn = QPushButton("Speak")
+        speak_btn.setFixedWidth(54)
+        speak_btn.setStyleSheet(_btn_style)
+        speak_btn.clicked.connect(self._inject_dialogue)
+        tlay.addWidget(speak_btn)
+        self._dialogue_test_row = test_row
+        test_row.setVisible(self.cfg.ui.dialogue_test_box)
+        blay.addWidget(test_row)
+
+        grip = _DialogueGrip(self._dialogue_log)
+        grip.committed.connect(self._on_dialogue_resized)
+        blay.addWidget(grip)
+
+        lay.addWidget(self._dialogue_body)
+        self._apply_dialogue_collapsed()
+        return container
+
     def _inject_ocr(self) -> None:
         """Feed the typed text through the OCR matching pipeline and show the result.
 
@@ -989,9 +1320,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_debug(self, visible: bool) -> None:
         self._debug_widget.setVisible(visible)
-        # Keep the PiP preview clear of the debug panel (and its buttons).
-        self._preview.set_bottom_inset(
-            self._debug_widget.sizeHint().height() if visible else 0)
+        # Keep the PiP preview clear of the docked panels (and their buttons).
+        self._sync_preview_inset()
 
     def _toggle_preview(self, visible: bool) -> None:
         self._preview.setVisible(visible)
@@ -1095,6 +1425,289 @@ class MainWindow(QMainWindow):
         matched = ", ".join(monsters) if monsters else "—"
         self._log_line(f"[{ts}]  raw:     {raw}")
         self._log_line(f"         matched: {matched}")
+
+    # ================= dialogue narration =================
+    def _ensure_speaker(self) -> Speaker:
+        """The live Speaker, built on first use and reconfigured thereafter."""
+        cfg = self.cfg.speech
+        if self.speaker is None:
+            self.speaker = Speaker(
+                backend=cfg.backend,
+                voice_online=cfg.voice_online, voice_offline=cfg.voice_offline,
+                rate=cfg.rate, volume=cfg.volume, max_queue=cfg.max_queue,
+                edge_retry_s=cfg.edge_retry_s,
+                on_error=self._speech_error.emit,
+                on_backend_changed=self._speech_backend_changed.emit,
+            )
+        else:
+            self.speaker.configure(
+                backend=cfg.backend, voice_online=cfg.voice_online,
+                voice_offline=cfg.voice_offline, rate=cfg.rate, volume=cfg.volume)
+        return self.speaker
+
+    def _stop_speaker(self) -> None:
+        if self.speaker is not None:
+            self.speaker.stop()
+            self.speaker = None
+
+    @pyqtSlot(str)
+    def _on_dialogue_text(self, text: str) -> None:
+        """A finished statement from the dialogue region.
+
+        Always logged and shown; spoken only when not muted."""
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self._dialogue_seq += 1
+        # appendleft keeps the newest first; the deque's maxlen then drops the
+        # OLDEST entry off the far end, which is the only correct direction.
+        self._dialogue_entries.appendleft((self._dialogue_seq, ts, text))
+        self._render_dialogue_log()
+        tag = "muted" if self.cfg.speech.muted else (
+            self.speaker.current_backend() if self.speaker else "off")
+        self._log_line(f"[{ts}]  [dialogue · {tag or 'pending'}] {text}")
+        if not self.cfg.speech.muted:
+            self._ensure_speaker().say(text)
+
+    def _render_dialogue_log(self) -> None:
+        """Repaint the transcript, newest entry first.
+
+        Each row is banded by its own sequence number rather than its position,
+        so a line keeps the same shade as newer statements push it down — banding
+        by position would make every row flip shade on each new line."""
+        rows = []
+        for seq, ts, text in self._dialogue_entries:
+            picked = seq == self._dialogue_selected
+            rows.append(
+                '<tr><td style="background:{bg}; padding:4px 7px;">'
+                '<a href="{seq}" style="text-decoration:none;">'
+                '<span style="color:{stamp}; font-size:10pt;">[{ts}]</span>'
+                '<span style="font-size:13pt; color:{fg};"> {text}</span>'
+                '</a></td></tr>'.format(
+                    seq=seq,
+                    bg=(_DIALOGUE_SELECTED if picked
+                        else _DIALOGUE_ROWS[seq % len(_DIALOGUE_ROWS)]),
+                    stamp="#c8c8e0" if picked else _DIALOGUE_STAMP,
+                    fg=_TRACKING_FG, ts=ts, text=html.escape(text)))
+        self._dialogue_log.setHtml(
+            '<table width="100%" cellspacing="0" cellpadding="0"'
+            ' style="font-family:Segoe UI, sans-serif;">{}</table>'.format(
+                "".join(rows)))
+        self._dialogue_log.verticalScrollBar().setValue(0)   # newest is at the top
+
+    def _clear_dialogue_log(self) -> None:
+        self._dialogue_entries.clear()
+        self._dialogue_selected = None
+        self.replay_btn.setEnabled(False)
+        self._dialogue_log.clear()
+
+    def _select_dialogue_entry(self, seq: int) -> None:
+        """Pick a line (or unpick it, if it was already the picked one)."""
+        self._dialogue_selected = None if seq == self._dialogue_selected else seq
+        self.replay_btn.setEnabled(self._dialogue_selected is not None)
+        self._render_dialogue_log()
+
+    def _replay_selected(self) -> None:
+        if self._dialogue_selected is not None:
+            self._replay_entry(self._dialogue_selected)
+
+    def _replay_entry(self, seq: int) -> None:
+        """Speak a line from the transcript again.
+
+        Mute is honoured — silently replaying into a muted session would just
+        look broken — so say why nothing happened instead."""
+        for entry_seq, _ts, text in self._dialogue_entries:
+            if entry_seq != seq:
+                continue
+            self._dialogue_selected = seq
+            self.replay_btn.setEnabled(True)
+            self._render_dialogue_log()
+            if self.cfg.speech.muted:
+                self.statusBar().showMessage(
+                    "Narration is muted — unmute to replay a line", 4000)
+                return
+            self._ensure_speaker().say(text)
+            self.statusBar().showMessage(f"Replaying: {text[:60]}", 3000)
+            return
+
+    @pyqtSlot(str)
+    def _on_speech_error(self, message: str) -> None:
+        self.statusBar().showMessage(f"⚠ {message}", 6000)
+        self._log_line(f"[speech] {message}")
+
+    @pyqtSlot(str, str)
+    def _on_speech_backend_changed(self, name: str, reason: str) -> None:
+        """The speaker switched voice source — usually the online/offline fallback."""
+        backend = BACKENDS.get(name)
+        label = backend.label if backend else name
+        self._dialogue_backend_lbl.setText(f"· {label}")
+        if reason != "selected":
+            self.statusBar().showMessage(f"Narration: {label} — {reason}", 5000)
+            self._log_line(f"[speech] switched to {label} ({reason})")
+
+    def _toggle_speech(self, checked: bool) -> None:
+        """Turn the whole dialogue pipeline on or off (OCR included)."""
+        self.cfg.speech.enabled = checked
+        self.cfg.save()
+        if checked:
+            self._ensure_speaker()
+            if not self.cfg.ocr.regions_dialogue.is_set():
+                self.statusBar().showMessage(
+                    "No dialogue region yet — set one with Calibrate regions (F9)", 6000)
+        else:
+            self._stop_speaker()
+            if not self._tracking_active:
+                self._push_idle_regions()
+        self._sync_speech_ui()
+
+    def _set_muted(self, muted: bool) -> None:
+        """Silence the audio while leaving detection, the log and the panel alone."""
+        if self.cfg.speech.muted == muted and self.mute_btn.isChecked() == muted:
+            return
+        self.cfg.speech.muted = muted
+        self.cfg.save()
+        if muted and self.speaker is not None:
+            self.speaker.flush()   # cut the line mid-sentence, don't let it finish
+        self._sync_speech_ui()
+
+    def _update_mute_btn(self) -> None:
+        muted = self.cfg.speech.muted
+        self.mute_btn.setText("🔇 Muted" if muted else "🔊 Speak")
+        self.mute_btn.setToolTip(
+            "Narration muted — dialogue is still detected and logged"
+            if muted else "Narration on — click to mute")
+
+    def _sync_speech_ui(self) -> None:
+        """Keep the Mute button and its menu twin showing the same state."""
+        for widget, value in ((self.mute_btn, self.cfg.speech.muted),
+                              (self.act_mute, self.cfg.speech.muted),
+                              (self.act_speech, self.cfg.speech.enabled)):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
+        self._update_mute_btn()
+
+    def _set_speech_backend(self, name: str) -> None:
+        self.cfg.speech.backend = name
+        self.cfg.save()
+        if self.speaker is not None:
+            self._ensure_speaker()
+        label = BACKENDS[name].label if name in BACKENDS else "Automatic"
+        self.statusBar().showMessage(f"Narration voice source: {label}", 3000)
+
+    def _set_speech_rate(self, rate: int) -> None:
+        self.cfg.speech.rate = rate
+        self.cfg.save()
+        if self.speaker is not None:
+            self._ensure_speaker()
+
+    def _set_speech_voice(self, name: str, backend: str) -> None:
+        """Store the chosen voice against the backend whose list it came from.
+
+        The two namespaces are disjoint ("en-GB-RyanNeural" vs "Microsoft David
+        Desktop …"), so each backend keeps its own setting."""
+        if backend == EdgeNeuralBackend.name:
+            self.cfg.speech.voice_online = name
+        else:
+            self.cfg.speech.voice_offline = name
+        self.cfg.save()
+        if self.speaker is not None:
+            self._ensure_speaker()
+        self.statusBar().showMessage(f"Narration voice: {name}", 3000)
+
+    def _populate_voice_menu(self) -> None:
+        """Fill the Voice submenu on open — the online list is a network call,
+        so it must never happen at startup."""
+        self.voice_menu.clear()
+        speaker = self._ensure_speaker()
+        backend = speaker.resolved_backend()
+        names = speaker.voices(backend)
+        if not names:
+            act = self.voice_menu.addAction("No voices available")
+            act.setEnabled(False)
+            return
+        current = (self.cfg.speech.voice_online if backend == EdgeNeuralBackend.name
+                   else self.cfg.speech.voice_offline)
+        group = QActionGroup(self.voice_menu)
+        group.setExclusive(True)
+        for name in names:
+            act = QAction(name, self.voice_menu)
+            act.setCheckable(True)
+            act.setChecked(name == current)
+            act.triggered.connect(
+                lambda _c, n=name, b=backend: self._set_speech_voice(n, b))
+            group.addAction(act)
+            self.voice_menu.addAction(act)
+
+    def _inject_dialogue(self) -> None:
+        """Narrate a typed line, as if the dialogue region had just read it.
+
+        Runs the text through the same cleaning a real read gets, so what you
+        hear is what the pipeline would actually produce — paste in a line with
+        a ▼ advance arrow or stray box glyphs and they drop out here too. Works
+        with no capture source and no calibrated region, and still respects Mute
+        (the line is logged and displayed either way)."""
+        from ..dialogue import clean_statement, is_speakable
+        raw = self._dialogue_input.text().strip()
+        if not raw:
+            return
+        text = clean_statement(raw)
+        if not is_speakable(text, self.cfg.speech.min_chars):
+            self.statusBar().showMessage(
+                f"Too fragmentary to narrate: {text!r} "
+                f"(needs {self.cfg.speech.min_chars}+ characters of prose)", 5000)
+            return
+        self._dialogue_input.clear()
+        self._on_dialogue_text(text)
+
+    def _test_voice(self) -> None:
+        self._ensure_speaker().say(
+            "Dialogue narration is ready. This is how side characters will sound.")
+
+    def _stop_speaking(self) -> None:
+        if self.speaker is not None:
+            self.speaker.flush()
+
+    def _toggle_dialogue_panel(self, visible: bool) -> None:
+        self._dialogue_widget.setVisible(visible)
+        self._sync_preview_inset()
+
+    def _on_dialogue_resized(self, height: int) -> None:
+        """Persist a drag-resize of the transcript (once, on mouse release)."""
+        self.cfg.ui.dialogue_height = int(height)
+        self.cfg.save()
+
+    def _toggle_dialogue_test_box(self, visible: bool) -> None:
+        """Show or hide the type-a-line box; the transcript itself is unaffected."""
+        self.cfg.ui.dialogue_test_box = bool(visible)
+        self.cfg.save()
+        self._dialogue_test_row.setVisible(bool(visible))
+
+    def _set_dialogue_collapsed(self, collapsed: bool) -> None:
+        """Fold the strip down to its header, or unfold it again."""
+        collapsed = bool(collapsed)
+        if collapsed == self.cfg.ui.dialogue_collapsed:
+            return
+        self.cfg.ui.dialogue_collapsed = collapsed
+        self.cfg.save()
+        self._apply_dialogue_collapsed()
+
+    def _apply_dialogue_collapsed(self) -> None:
+        collapsed = self.cfg.ui.dialogue_collapsed
+        self._dialogue_body.setVisible(not collapsed)
+        # Chevron points up while expanded (click folds it), down while
+        # collapsed — the same convention as the controller map overlay.
+        self.dialogue_fold_btn.setText("▼" if collapsed else "▲")
+        self.dialogue_fold_btn.setToolTip(
+            "Expand the dialogue log" if collapsed else "Collapse to the header")
+
+    def _sync_preview_inset(self) -> None:
+        """Keep the PiP clear of the panels docked below it.
+
+        Only the debug panel counts: the dialogue strip sits at the top of the
+        pane, nowhere near the bottom-left preview."""
+        inset = (self._debug_widget.sizeHint().height()
+                 if self._debug_widget.isVisible() else 0)
+        self._preview.set_bottom_inset(inset)
 
     # ================= ocr engine =================
     def _toggle_gpu(self, checked: bool) -> None:
@@ -1345,6 +1958,7 @@ class MainWindow(QMainWindow):
                 gs = GameSettings(
                     monster_names=self.cfg.ocr.regions_monster_names,
                     battle_end=self.cfg.ocr.regions_battle_end,
+                    dialogue=self.cfg.ocr.regions_dialogue,
                     end_keywords=self.cfg.ocr.keywords_battle_end,
                 )
                 self.cfg.set_regions_for(self.cfg.selected_game, gs)
@@ -1367,6 +1981,9 @@ class MainWindow(QMainWindow):
         # Stop the recorder before capture, so no frame arrives for a buffer
         # whose segment files have already been removed.
         self._stop_recorder(confirm=False)
+        # Speech before the worker: no point synthesising a statement whose
+        # source is about to disappear.
+        self._stop_speaker()
         if self.worker:
             self.worker.stop()
             self.worker.wait(1500)
