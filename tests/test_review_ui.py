@@ -233,3 +233,128 @@ def test_pip_click_emits_only_when_clickable(app):
     grip = QPointF(pip.width() - 4, 4)          # the resize handle, not a click
     press_release(grip)
     assert fired == [True]
+
+
+# ============================ save a single frame ============================
+def test_saving_a_frame_writes_a_png(overlay, tmp_path):
+    overlay._seek_index(7)
+    overlay._on_save_frame()
+    written = list((tmp_path / "recordings").glob("frame_*.png"))
+    assert len(written) == 1
+    assert written[0].stat().st_size > 0
+    assert "Saved" in overlay._status.text()
+
+
+def test_the_saved_frame_is_the_one_on_screen(overlay, tmp_path):
+    """Each buffered frame is a flat shade, so the pixels identify the frame."""
+    import cv2
+    overlay._seek_index(3)
+    expected = overlay._snap.frame(3)
+    overlay._on_save_frame()
+    written = list((tmp_path / "recordings").glob("frame_*.png"))[0]
+    got = cv2.imread(str(written))
+    assert got.shape == expected.shape
+    assert int(abs(got.astype(int) - expected.astype(int)).max()) <= 1
+
+
+def test_saving_a_frame_reports_a_failure_rather_than_dying(overlay, monkeypatch):
+    monkeypatch.setattr(overlay._snap, "frame", lambda i: None)
+    overlay._on_save_frame()
+    assert "could not be read" in overlay._status.text()
+
+
+# ================================ trim markers ===============================
+def test_the_trim_starts_covering_the_whole_buffer(overlay):
+    assert (overlay._in_point, overlay._out_point) == (0, 19)
+    assert not overlay._trimmed()
+    assert overlay._save_btn.text() == "💾  Save clip"
+
+
+def test_marking_in_and_out_sets_the_span(overlay):
+    overlay._seek_index(5)
+    overlay._mark_in()
+    overlay._seek_index(12)
+    overlay._mark_out()
+    assert (overlay._in_point, overlay._out_point) == (5, 12)
+    assert overlay._trimmed()
+
+
+def test_the_save_button_shows_the_trimmed_duration(overlay):
+    overlay._seek_index(4)
+    overlay._mark_in()
+    overlay._seek_index(14)
+    overlay._mark_out()
+    assert "(" in overlay._save_btn.text()      # duration is spelled out
+
+
+def test_marking_in_past_the_end_carries_the_end_along(overlay):
+    """Otherwise the pair would cross over and select nothing."""
+    overlay._seek_index(3)
+    overlay._mark_out()
+    overlay._seek_index(15)
+    overlay._mark_in()
+    assert overlay._in_point == 15
+    assert overlay._out_point >= overlay._in_point
+
+
+def test_marking_out_before_the_start_carries_the_start_along(overlay):
+    overlay._seek_index(15)
+    overlay._mark_in()
+    overlay._seek_index(2)
+    overlay._mark_out()
+    assert overlay._out_point == 2
+    assert overlay._in_point <= overlay._out_point
+
+
+def test_clearing_the_trim_restores_the_whole_buffer(overlay):
+    overlay._seek_index(5)
+    overlay._mark_in()
+    assert overlay._trimmed()
+    overlay._clear_trim()
+    assert (overlay._in_point, overlay._out_point) == (0, 19)
+    assert not overlay._trimmed()
+
+
+def test_dragging_a_marker_updates_the_overlay(overlay):
+    overlay._scrub.markers_changed.emit(6, 11)
+    assert (overlay._in_point, overlay._out_point) == (6, 11)
+    assert overlay._trimmed()
+
+
+def test_the_markers_cannot_cross_when_dragged(overlay):
+    """The bar pushes rather than swaps, so in stays <= out at all times."""
+    overlay._scrub.set_markers(5, 12)
+    overlay._scrub._drag = "in"
+    overlay._scrub._move_marker(overlay._scrub._x_at(18))   # drag past the end
+    assert overlay._scrub.markers()[0] <= overlay._scrub.markers()[1]
+    overlay._scrub._drag = "out"
+    overlay._scrub._move_marker(overlay._scrub._x_at(0))    # drag past the start
+    assert overlay._scrub.markers()[0] <= overlay._scrub.markers()[1]
+
+
+def test_only_the_marked_span_is_exported(overlay, tmp_path):
+    import cv2
+    overlay._seek_index(4)
+    overlay._mark_in()
+    overlay._seek_index(9)
+    overlay._mark_out()
+    overlay._on_save_clicked()
+    assert overlay._export is not None
+    overlay._export.wait(20000)
+    written = sorted((tmp_path / "recordings").glob("review_*.*"))
+    assert written, "nothing was written"
+    cap = cv2.VideoCapture(str(written[0]))
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    assert count == 6, f"expected frames 4..9 inclusive, got {count}"
+
+
+def test_an_untrimmed_save_still_writes_everything(overlay, tmp_path):
+    import cv2
+    overlay._on_save_clicked()
+    overlay._export.wait(20000)
+    written = sorted((tmp_path / "recordings").glob("review_*.*"))[0]
+    cap = cv2.VideoCapture(str(written))
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    assert count == 20

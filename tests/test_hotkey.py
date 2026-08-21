@@ -42,3 +42,17 @@ def test_ui_config_defaults():
     cfg = Config.from_dict({"ui": {"always_on_top": True}})
     assert cfg.ui.auto_start_tracking is False
     assert cfg.ui.snapshot_hotkey == "ctrl+alt+s"
+
+
+# ------------------------------------------------------- mute hotkey default
+def test_the_mute_hotkey_default_parses():
+    """A default that cannot be parsed would silently never register."""
+    from grimoireassist.config import UiConfig
+    assert parse_hotkey(UiConfig().mute_hotkey) is not None
+
+
+def test_the_mute_and_snapshot_defaults_are_different_keys():
+    """Registering the same combination twice would lose one of them."""
+    from grimoireassist.config import UiConfig
+    ui = UiConfig()
+    assert parse_hotkey(ui.mute_hotkey) != parse_hotkey(ui.snapshot_hotkey)

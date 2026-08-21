@@ -9,6 +9,37 @@ import numpy as np
 from .engine import OcrEngine, preprocess, preprocess_scale
 
 
+def _in_reading_order(boxes: list) -> list:
+    """Order boxes top-to-bottom, then left-to-right *within each line*.
+
+    Sorting on the raw ycentre is not enough. EasyOCR reports the parts of one
+    visual line with centres a pixel or two apart, and a plain (ycentre, left)
+    sort then emits them across the line rather than along it — "If something
+    strange ever got | into the water-" comes back as "into the water- If
+    something strange ever got", and that is exactly what gets spoken.
+
+    Boxes whose centres sit within 60% of their height are treated as one line
+    — the same tolerance the merge below uses to decide two parts share a line.
+    """
+    ordered = sorted(boxes, key=lambda b: b["ycenter"])
+    rows: list = []
+    current: list = []
+    for box in ordered:
+        if current:
+            reference = current[0]
+            tolerance = 0.6 * max(box["height"] or 1.0, reference["height"] or 1.0)
+            if abs(box["ycenter"] - reference["ycenter"]) > tolerance:
+                rows.append(current)
+                current = []
+        current.append(box)
+    if current:
+        rows.append(current)
+    out: list = []
+    for row in rows:
+        out.extend(sorted(row, key=lambda b: b["left"]))
+    return out
+
+
 def _merge_adjacent_boxes(boxes: list) -> list:
     """Group word/phrase boxes into lines, joining horizontally-adjacent ones.
 
@@ -22,8 +53,7 @@ def _merge_adjacent_boxes(boxes: list) -> list:
     never absorbed."""
     if not boxes:
         return []
-    # Order top-to-bottom, then left-to-right.
-    boxes = sorted(boxes, key=lambda b: (b["ycenter"], b["left"]))
+    boxes = _in_reading_order(boxes)
     out = []
     cur_text: list = []
     cur_confs: list = []

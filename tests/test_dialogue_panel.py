@@ -110,7 +110,7 @@ def test_every_line_is_kept_in_order(app):
     win = _LogWindow()
     for line in ("One.", "Two.", "Three."):
         _say(win, line)
-    assert [text for _seq, _ts, text in win._dialogue_entries] == [
+    assert [text for _seq, _ts, _h, text in win._dialogue_entries] == [
         "Three.", "Two.", "One."]
 
 
@@ -120,7 +120,7 @@ def test_the_oldest_line_is_dropped_once_the_log_is_full(app):
     win = _LogWindow()
     for i in range(_DIALOGUE_MAX_LINES + 5):
         _say(win, f"Line {i}.")
-    texts = [text for _seq, _ts, text in win._dialogue_entries]
+    texts = [text for _seq, _ts, _h, text in win._dialogue_entries]
     assert len(texts) == _DIALOGUE_MAX_LINES
     assert texts[0] == f"Line {_DIALOGUE_MAX_LINES + 4}."      # newest kept
     assert "Line 0." not in texts                              # oldest dropped
@@ -182,7 +182,7 @@ def test_a_line_keeps_its_band_as_newer_lines_push_it_down(app):
     first_seq = win._dialogue_entries[0][0]
     _say(win, "Second.")
     _say(win, "Third.")
-    still = [seq for seq, _ts, text in win._dialogue_entries if text == "First."]
+    still = [seq for seq, _ts, _h, text in win._dialogue_entries if text == "First."]
     assert still == [first_seq]
 
 
@@ -270,7 +270,7 @@ def _pick(win, seq):
 
 
 def _seq_of(win, text):
-    return next(seq for seq, _ts, line in win._dialogue_entries if line == text)
+    return next(seq for seq, _ts, _h, line in win._dialogue_entries if line == text)
 
 
 def test_clicking_a_line_picks_it(app):
@@ -454,3 +454,352 @@ def test_stop_cuts_the_line_being_spoken(app):
 def test_stop_is_harmless_before_anything_has_been_spoken(app):
     """The speaker is built lazily, so Stop can be clicked while there is none."""
     MainWindow._stop_speaking(_StopWindow(None))   # must not raise
+
+
+# ---------------------------------------------------- tracking view only
+class _ViewWindow:
+    """The slice of MainWindow that decides whether the strip is on screen."""
+
+    def __init__(self):
+        self._dialogue_widget = QWidget()
+        self._dialogue_wanted = False
+        self._grimoire_shown = False
+        self._debug_widget = QWidget()
+        self._debug_widget.setVisible(False)
+        self._preview = _FakePreview()
+
+    def _sync_preview_inset(self):
+        MainWindow._sync_preview_inset(self)
+
+    def _apply_dialogue_visibility(self):
+        MainWindow._apply_dialogue_visibility(self)
+
+    def _shown(self):
+        return self._dialogue_widget.isVisibleTo(
+            self._dialogue_widget.parentWidget())
+
+
+class _FakePreview:
+    def __init__(self):
+        self.inset = None
+
+    def set_bottom_inset(self, value):
+        self.inset = value
+
+
+def _want(win, wanted):
+    MainWindow._toggle_dialogue_panel(win, wanted)
+
+
+def _grimoire(win, shown):
+    win._grimoire_shown = shown
+    MainWindow._apply_dialogue_visibility(win)
+
+
+def test_the_strip_shows_on_the_tracking_view(app):
+    win = _ViewWindow()
+    _want(win, True)
+    assert win._shown()
+
+
+def test_the_strip_is_hidden_on_the_grimoire_view(app):
+    """The Grimoire gets the whole pane; the transcript belongs to tracking."""
+    win = _ViewWindow()
+    _want(win, True)
+    _grimoire(win, True)
+    assert not win._shown()
+
+
+def test_it_comes_back_when_returning_to_tracking(app):
+    win = _ViewWindow()
+    _want(win, True)
+    _grimoire(win, True)
+    _grimoire(win, False)
+    assert win._shown()
+
+
+def test_turning_it_on_while_on_the_grimoire_is_remembered(app):
+    """Toggling it on there should take effect on the way back, not immediately."""
+    win = _ViewWindow()
+    _grimoire(win, True)
+    _want(win, True)
+    assert not win._shown()      # still the Grimoire view
+    _grimoire(win, False)
+    assert win._shown()          # honoured on return
+
+
+def test_turning_it_off_stays_off_across_a_view_switch(app):
+    win = _ViewWindow()
+    _want(win, True)
+    _want(win, False)
+    _grimoire(win, True)
+    _grimoire(win, False)
+    assert not win._shown()
+
+
+# -------------------------------------------------------- empty-log guidance
+class _PlaceholderWindow:
+    def __init__(self):
+        self.cfg = Config()
+        self._dialogue_log = QTextEdit()
+        self._dialogue_entries = deque(maxlen=_DIALOGUE_MAX_LINES)
+        self._dialogue_selected = None
+
+    def _dialogue_placeholder(self):
+        return MainWindow._dialogue_placeholder(self)
+
+    def text(self):
+        MainWindow._render_dialogue_log(self)
+        return self._dialogue_log.toPlainText()
+
+
+def test_an_empty_log_says_narration_is_off(app):
+    win = _PlaceholderWindow()
+    assert "off" in win.text().lower()
+
+
+def test_an_empty_log_points_at_calibration_when_no_region_is_set(app):
+    """The commonest cause of 'it never detects anything'."""
+    from grimoireassist.config import Region
+    win = _PlaceholderWindow()
+    win.cfg.speech.enabled = True
+    body = win.text()
+    assert "F9" in body and "dialogue" in body.lower()
+
+    win.cfg.ocr.regions_dialogue = Region(90, 520, 1100, 150)
+    assert "F9" not in win.text()
+
+
+def test_an_empty_log_says_it_is_listening_once_set_up(app):
+    from grimoireassist.config import Region
+    win = _PlaceholderWindow()
+    win.cfg.speech.enabled = True
+    win.cfg.ocr.regions_dialogue = Region(90, 520, 1100, 150)
+    assert "listening" in win.text().lower()
+
+
+def test_the_placeholder_gives_way_to_real_lines(app):
+    from grimoireassist.config import Region
+    win = _PlaceholderWindow()
+    win.cfg.speech.enabled = True
+    win.cfg.ocr.regions_dialogue = Region(90, 520, 1100, 150)
+    win._dialogue_entries.appendleft((1, "12:00:00", "", "Careful there."))
+    body = win.text()
+    assert "Careful there." in body and "listening" not in body.lower()
+
+
+# ------------------------------------------------------------- mute hotkey
+class _MuteWindow:
+    """The slice of MainWindow the mute hotkey drives."""
+
+    def __init__(self, muted=False):
+        self.cfg = Config()
+        self.cfg.speech.muted = muted
+        self.cfg.save = lambda *a, **k: None
+        self.mute_btn = QPushButton()
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setChecked(muted)
+        self.speaker = None
+        self.flushes = []
+        self._bar = _FakeStatusBar()
+        self.synced = 0
+
+    def statusBar(self):
+        return self._bar
+
+    def _sync_speech_ui(self):
+        self.synced += 1
+
+    def _set_muted(self, muted):
+        MainWindow._set_muted(self, muted)
+
+    def _toggle_mute(self):
+        MainWindow._toggle_mute(self)
+
+
+def test_the_hotkey_mutes_when_unmuted(app):
+    win = _MuteWindow(muted=False)
+    win._toggle_mute()
+    assert win.cfg.speech.muted is True
+    assert any("muted" in m for m in win._bar.messages)
+
+
+def test_the_hotkey_unmutes_when_muted(app):
+    win = _MuteWindow(muted=True)
+    win._toggle_mute()
+    assert win.cfg.speech.muted is False
+    assert any("unmuted" in m for m in win._bar.messages)
+
+
+def test_the_hotkey_keeps_toggling(app):
+    win = _MuteWindow(muted=False)
+    for expected in (True, False, True, False):
+        win._toggle_mute()
+        assert win.cfg.speech.muted is expected
+
+
+def test_the_hotkey_follows_the_config_not_the_button(app):
+    """The button can be out of step (menu, or an earlier press); the config is
+    the thing that actually decides whether audio plays."""
+    win = _MuteWindow(muted=True)
+    win.mute_btn.setChecked(False)          # stale button state
+    win._toggle_mute()
+    assert win.cfg.speech.muted is False    # toggled from the config's True
+
+
+def test_muting_by_hotkey_cuts_the_line_in_progress(app):
+    class _Speaker:
+        def __init__(self):
+            self.flushed = 0
+
+        def flush(self):
+            self.flushed += 1
+
+    win = _MuteWindow(muted=False)
+    win.speaker = _Speaker()
+    win._toggle_mute()
+    assert win.speaker.flushed == 1
+
+
+# --------------------------------------------- offering narration after F9
+class _OfferWindow:
+    """The slice of MainWindow that _offer_narration uses."""
+
+    def __init__(self):
+        self.cfg = Config()
+        self.asked = []
+        self.act_speech = QPushButton()      # stands in for the checkable action
+        self.act_speech.setCheckable(True)
+
+    def _offer(self, answer):
+        import grimoireassist.ui.main_window as mw
+        from PyQt6.QtWidgets import QMessageBox
+        real = QMessageBox.question
+
+        def fake(*args, **kwargs):
+            self.asked.append(args[1] if len(args) > 1 else "")
+            return answer
+        QMessageBox.question = staticmethod(fake)
+        try:
+            mw.MainWindow._offer_narration(self)
+        finally:
+            QMessageBox.question = real
+
+
+def test_no_offer_when_no_dialogue_region_is_set(app):
+    from PyQt6.QtWidgets import QMessageBox
+    win = _OfferWindow()
+    win._offer(QMessageBox.StandardButton.Yes)
+    assert win.asked == []                    # nothing to offer
+
+
+def test_no_offer_when_narration_is_already_on(app):
+    from PyQt6.QtWidgets import QMessageBox
+    from grimoireassist.config import Region
+    win = _OfferWindow()
+    win.cfg.ocr.regions_dialogue = Region(4, 679, 831, 401)
+    win.cfg.speech.enabled = True
+    win._offer(QMessageBox.StandardButton.Yes)
+    assert win.asked == []
+
+
+def test_a_new_dialogue_region_offers_to_turn_narration_on(app):
+    from PyQt6.QtWidgets import QMessageBox
+    from grimoireassist.config import Region
+    win = _OfferWindow()
+    win.cfg.ocr.regions_dialogue = Region(4, 679, 831, 401)
+    win._offer(QMessageBox.StandardButton.Yes)
+    assert len(win.asked) == 1
+    assert win.act_speech.isChecked()          # accepted -> switched on
+
+
+def test_declining_the_offer_leaves_narration_off(app):
+    from PyQt6.QtWidgets import QMessageBox
+    from grimoireassist.config import Region
+    win = _OfferWindow()
+    win.cfg.ocr.regions_dialogue = Region(4, 679, 831, 401)
+    win._offer(QMessageBox.StandardButton.No)
+    assert len(win.asked) == 1
+    assert not win.act_speech.isChecked()
+
+
+# --------------------------------------------------------- headers in the log
+def test_a_header_is_stored_alongside_its_line(app):
+    win = _LogWindow()
+    MainWindow._on_dialogue_text(win, "At sunset, I heard dogs barking.",
+                                 "Heart-to-Heart Info")
+    seq, ts, header, text = win._dialogue_entries[0]
+    assert header == "Heart-to-Heart Info"
+    assert "Heart-to-Heart" not in text
+
+
+def test_a_header_is_shown_in_its_own_colour(app):
+    from grimoireassist.ui.main_window import _DIALOGUE_HEADER
+    win = _LogWindow()
+    MainWindow._on_dialogue_text(win, "At sunset, I heard dogs barking.",
+                                 "Heart-to-Heart Info")
+    assert _DIALOGUE_HEADER.lower() in win.html().lower()
+    assert "Heart-to-Heart Info" in win._dialogue_log.toPlainText()
+
+
+def test_a_header_is_never_spoken(app):
+    win = _LogWindow()
+    win.cfg.speech.muted = False
+    MainWindow._on_dialogue_text(win, "At sunset, I heard dogs barking.",
+                                 "Heart-to-Heart Info")
+    assert win.spoken == ["At sunset, I heard dogs barking."]
+
+
+def test_replaying_a_line_does_not_speak_its_header_either(app):
+    win = _LogWindow()
+    win.cfg.speech.muted = False
+    MainWindow._on_dialogue_text(win, "At sunset, I heard dogs barking.",
+                                 "Heart-to-Heart Info")
+    win.spoken.clear()
+    MainWindow._replay_entry(win, win._dialogue_entries[0][0])
+    assert win.spoken == ["At sunset, I heard dogs barking."]
+
+
+def test_a_line_with_no_header_renders_without_one(app):
+    win = _LogWindow()
+    MainWindow._on_dialogue_text(win, "Just a plain line of dialogue.")
+    assert win._dialogue_entries[0][2] == ""
+    assert win._dialogue_log.toPlainText().strip().endswith(
+        "Just a plain line of dialogue.")
+
+
+def test_the_header_survives_a_real_signal_hop(app):
+    """Qt honours the slot's *declared* signature: a @pyqtSlot(str) on the
+    receiver drops the header the signal is sending, and it arrives as the
+    default "" with nothing raised. Only driving a real signal catches that, so
+    the slot is exercised here through one rather than called directly."""
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    class _Emitter(QObject):
+        dialogue_text = pyqtSignal(str, str)
+
+    class _Receiver(QObject):
+        # the real slot, decorator and all
+        _on_dialogue_text = MainWindow._on_dialogue_text
+
+        def __init__(self):
+            super().__init__()
+            self.cfg = Config()
+            self.cfg.speech.muted = True
+            self._dialogue_log = QTextEdit()
+            self._dialogue_entries = deque(maxlen=_DIALOGUE_MAX_LINES)
+            self._dialogue_seq = 0
+            self._dialogue_selected = None
+            self.speaker = None
+
+        def _log_line(self, text):
+            pass
+
+        def _render_dialogue_log(self):
+            MainWindow._render_dialogue_log(self)
+
+    emitter, receiver = _Emitter(), _Receiver()
+    emitter.dialogue_text.connect(receiver._on_dialogue_text)
+    emitter.dialogue_text.emit("At sunset, I heard dogs barking.",
+                               "Heart-to-Heart Info")
+    assert receiver._dialogue_entries[0][2] == "Heart-to-Heart Info"

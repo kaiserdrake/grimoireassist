@@ -250,10 +250,8 @@ class EdgeNeuralBackend(SpeechBackend):
     def __init__(self, cache_dir=None) -> None:
         import edge_tts  # noqa: F401  — fail here if the package is missing
         from pathlib import Path
-        from . import app_root
-        self._dir = Path(cache_dir) if cache_dir else app_root() / "cache" / "tts"
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._sweep()
+        self._dir_hint = Path(cache_dir) if cache_dir else None
+        self._dir = None            # resolved on first use, never here
         self._voice = "en-GB-RyanNeural"
         self._rate = 0
         self._volume = 90
@@ -268,8 +266,39 @@ class EdgeNeuralBackend(SpeechBackend):
         except Exception:
             return False
 
+    def _clip_dir(self):
+        """Directory for synthesised clips, resolved on first use.
+
+        Deliberately not resolved in __init__: a portable copy unzipped
+        somewhere read-only (Program Files, a network share, a mounted image)
+        would otherwise raise there and take the whole online voice down before
+        a single word was spoken — leaving only the offline voices on offer.
+        The system temp directory is the fallback."""
+        if self._dir is not None:
+            return self._dir
+        import tempfile
+        from pathlib import Path
+        from . import app_root
+        candidates = [self._dir_hint] if self._dir_hint else [
+            app_root() / "cache" / "tts"]
+        candidates.append(Path(tempfile.gettempdir()) / "grimoireassist-tts")
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                probe = candidate / ".write-probe"
+                probe.write_bytes(b"")
+                probe.unlink()
+            except Exception:
+                continue
+            self._dir = candidate
+            self._sweep()
+            return candidate
+        raise RuntimeError("no writable directory for speech clips")
+
     def _sweep(self) -> None:
         """Drop clips left behind by a previous run (a crash mid-playback)."""
+        if self._dir is None:
+            return
         for stale in self._dir.glob("*.mp3"):
             try:
                 stale.unlink()
@@ -303,7 +332,7 @@ class EdgeNeuralBackend(SpeechBackend):
         import asyncio
         import edge_tts
         self._seq += 1
-        path = self._dir / f"line{self._seq:04d}.mp3"
+        path = self._clip_dir() / f"line{self._seq:04d}.mp3"
         # SSML-free percentage form; -10..10 maps to a +/-50% spread.
         communicate = edge_tts.Communicate(text, self._voice,
                                            rate=f"{self._rate * 5:+d}%")
@@ -442,14 +471,18 @@ class Speaker:
         if name in self._instances:
             return self._instances[name]
         factory = self._factories.get(name)
-        inst = None
-        if factory is not None:
-            try:
-                inst = factory()
-            except Exception as exc:
-                inst = None
-                if name == "sapi":  # the fallback itself failing is worth saying
-                    self._fail(f"Offline speech unavailable: {exc}")
+        if factory is None:
+            return None
+        try:
+            inst = factory()
+        except Exception as exc:
+            # Deliberately NOT cached. A construction failure is often transient
+            # — a network hiccup, a directory not yet writable — and caching it
+            # would pin the session to the offline voice forever, silently
+            # defeating the edge_retry_s re-probe that exists to recover.
+            if name == "sapi":  # the fallback itself failing is worth saying
+                self._fail(f"Offline speech unavailable: {exc}")
+            return None
         self._instances[name] = inst
         return inst
 

@@ -511,8 +511,13 @@ class RollingRecorder:
 def export(snap: BufferSnapshot, path: str | Path,
            fps: Optional[float] = None,
            progress: Optional[Callable[[int, int], None]] = None,
-           cancel: Optional[threading.Event] = None) -> Path:
-    """Write a snapshot out as a playable video file.
+           cancel: Optional[threading.Event] = None,
+           start: int = 0, end: Optional[int] = None) -> Path:
+    """Write a snapshot — or a chosen span of it — as a playable video file.
+
+    `start`/`end` are inclusive frame indices; omitted, the whole buffer is
+    written. Both are clamped to the snapshot, and a reversed pair is put back
+    in order, so a caller cannot ask for an empty or backwards range.
 
     Tries mp4v/.mp4 and falls back to MJPG/.avi, since which codecs an OpenCV
     build can actually open varies per machine. The written file uses the
@@ -520,14 +525,20 @@ def export(snap: BufferSnapshot, path: str | Path,
     back without its real-time gap. Returns the path actually written (the
     suffix may differ from `path` if the fallback was used).
     """
-    total = len(snap)
-    if total == 0:
+    frames = len(snap)
+    if frames == 0:
         raise ValueError("nothing captured yet — the review buffer is empty")
+    last = frames - 1
+    first_i = min(max(int(start), 0), last)
+    last_i = last if end is None else min(max(int(end), 0), last)
+    if last_i < first_i:
+        first_i, last_i = last_i, first_i
+    total = last_i - first_i + 1
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     rate = float(fps or snap.fps or DEFAULT_FPS)
 
-    first = snap.frame(0)
+    first = snap.frame(first_i)
     if first is None:
         raise ValueError("the buffered frames could not be read back")
     h, w = first.shape[:2]
@@ -545,7 +556,7 @@ def export(snap: BufferSnapshot, path: str | Path,
         raise RuntimeError("no usable video encoder (tried mp4v and MJPG)")
 
     try:
-        for i in range(total):
+        for offset, i in enumerate(range(first_i, last_i + 1)):
             if cancel is not None and cancel.is_set():
                 raise ExportCancelled()
             img = snap.frame(i)
@@ -554,8 +565,8 @@ def export(snap: BufferSnapshot, path: str | Path,
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
             writer.write(img)
-            if progress is not None and (i % 15 == 0 or i == total - 1):
-                progress(i + 1, total)
+            if progress is not None and (offset % 15 == 0 or offset == total - 1):
+                progress(offset + 1, total)
     except ExportCancelled:
         writer.release()
         writer = None

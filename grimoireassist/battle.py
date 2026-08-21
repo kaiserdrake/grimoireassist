@@ -18,7 +18,9 @@ import cv2
 import numpy as np
 
 from .config import Config, Region
-from .dialogue import StatementReader, assemble_statement
+from .dialogue import (
+    StatementReader, assemble_statement, in_reading_order, split_header,
+)
 from .ocr import OcrEngine, conf_level, level_floor
 
 
@@ -287,8 +289,10 @@ try:
         monsters_changed = pyqtSignal(list)
         monster_killed = pyqtSignal(str)
         debug_text = pyqtSignal(str, list)  # status_text, monster_texts
-        # A finished dialogue-region statement, ready to be spoken.
-        dialogue_text = pyqtSignal(str)
+        # A finished dialogue-region statement, plus the box header / speaker
+        # label it sat under ("" when there wasn't one). The header is shown in
+        # the log but never spoken.
+        dialogue_text = pyqtSignal(str, str)
         # [(x, y, w, h, matched)] in frame coords: every configured region with
         # matched=False (outline), plus a matched=True box per recognised text.
         region_status = pyqtSignal(list)
@@ -310,6 +314,7 @@ try:
             self._last_status: Optional[list] = None  # last emitted region_status payload
             self._end_text_logged = ""     # last battle-end text written to the debug log
             self._dlg_text = ""            # last text read from the dialogue region
+            self._dlg_header = ""          # its box header / speaker label, if any
             self._dlg_boxes: list = []     # frame-coord boxes of the dialogue lines
             self.reader = StatementReader(
                 stable_frames=cfg.speech.stable_frames,
@@ -403,6 +408,27 @@ try:
         # it isn't worth an inference. Anything with real contrast is read.
         _BLANK_STDDEV = 3.0
 
+        @staticmethod
+        def _glyph_colour(crop: np.ndarray, box) -> Optional[tuple]:
+            """Mean (R, G, B) of the text strokes inside `box`.
+
+            The glyphs are the bright minority of a dialogue box, so the top
+            fifth of the brightness range is taken as "the text" and the
+            background — which is usually a dark translucent panel and would
+            otherwise dominate the average — is left out."""
+            if box is None or crop is None or crop.size == 0:
+                return None
+            x, y, w, h = box
+            cell = crop[max(0, y):y + h, max(0, x):x + w]
+            if cell.size == 0 or cell.ndim != 3:
+                return None
+            gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+            mask = gray >= np.percentile(gray, 80)
+            if not mask.any():
+                return None
+            b, g, r = cell[mask].mean(axis=0)
+            return (float(r), float(g), float(b))
+
         def _read_dialogue(self, frame: np.ndarray, now: float) -> None:
             """OCR the dialogue region and emit whole statements for speech.
 
@@ -423,6 +449,7 @@ try:
             if not self.cfg.speech.enabled or not region.is_set():
                 if self._dlg_boxes or self._dlg_text:
                     self._dlg_boxes, self._dlg_text = [], ""
+                    self._dlg_header = ""
                     self.reader.reset()
                 return
             crop = self._crop(frame, region)
@@ -435,11 +462,17 @@ try:
                 lines = self.engine.read_lines(crop)
             self._dlg_boxes = [(region.x + b[0], region.y + b[1], b[2], b[3])
                                for _t, _c, b in lines if b is not None]
-            self._dlg_text = assemble_statement(lines)
+            ordered = (in_reading_order(lines)
+                       if lines and all(len(e) > 2 and e[2] is not None for e in lines)
+                       else list(lines))
+            colours = [self._glyph_colour(crop, e[2]) for e in ordered]
+            self._dlg_header, body = split_header(ordered, colours)
+            self._dlg_text = assemble_statement(body)
             statement = self.reader.update(self._dlg_text, now)
             if statement:
-                self.debug_text.emit(f"[dialogue] {statement}", [])
-                self.dialogue_text.emit(statement)
+                label = f"{self._dlg_header}: " if self._dlg_header else ""
+                self.debug_text.emit(f"[dialogue] {label}{statement}", [])
+                self.dialogue_text.emit(statement, self._dlg_header)
 
         def run(self) -> None:
             interval = 1.0 / max(0.5, self.cfg.ocr.poll_fps)

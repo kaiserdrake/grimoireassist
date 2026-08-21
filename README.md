@@ -198,7 +198,9 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
     *Offline Windows voice*.
   - **Voice ▸** — the voices available from whichever source is active. Filled when you open the
     submenu, because listing the online voices is a network call.
-  - **Voice speed ▸** — *Slower* … *Faster*.
+  - **Voice speed ▸** — *Normal*, *Fast*, *Faster*, *Very fast*, *Fastest*. The range runs
+    upwards only: narration competes with the game for your attention, so the useful
+    direction is quicker, not slower.
   - **Test voice** — speaks one canned sentence. (Stopping mid-line lives on the dialogue
     strip's **■ Stop** button, next to the transcript it interrupts.)
 - **Game**
@@ -256,9 +258,18 @@ keep running behind it, and the buffer keeps recording while you watch.
   `←` / `→` step one frame, `Shift` + `←` / `→` jump a second, the mouse wheel steps over the
   picture, `Home` / `End` go to the oldest / newest frame. The readout shows position, the frame
   number, and the wall-clock time that frame was captured.
-- **Save clip** — writes everything currently in the buffer to `recordings/review_<timestamp>.mp4`
-  (`.avi`/MJPG if this machine's OpenCV can't open the mp4 encoder). It runs in the background with
-  a progress readout and can be cancelled; the 📁 button opens the folder.
+- **Save frame** — the 🖼 button (or **F**) writes the frame on screen to
+  `recordings/frame_<timestamp>.png`, full resolution as buffered. Handy for a monster you want to
+  look up later, or a bit of UI you want to calibrate a region against.
+- **Trim the clip** — the timeline carries two green trim handles. **Drag** them, or press **`[`**
+  and **`]`** to set the start and end to the frame you are on; **`\`** (or the ⤢ button) clears the
+  trim again. The handles push rather than cross, so the start can never end up after the end, and
+  the region outside the selection is dimmed. Once trimmed, the button reads
+  **Save clip (0:12)** so you know what you are about to write.
+- **Save clip** — writes the marked span (the whole buffer, until you trim it) to
+  `recordings/review_<timestamp>.mp4` (`.avi`/MJPG if this machine's OpenCV can't open the mp4
+  encoder). It runs in the background with a progress readout and can be cancelled; the 📁 button
+  opens the folder.
 - **Close** — the ✕ button or **Esc**, which returns you to the live PiP.
 
 The buffer status (`⏺ Review buffer: 12:34`) sits in the status bar, and the PiP tooltip shows how
@@ -348,6 +359,17 @@ Three ways to test narration with fixed input rather than a live capture card:
 A line the reader considers too fragmentary to be prose is refused with the reason in the status
 bar and left in the box so you can edit it, rather than being narrated as noise.
 
+> **UI caught in the region.** The region is a rectangle, so menus and button-hint bars
+> sometimes clip into it. Lines are only joined into one statement when they belong to the same
+> paragraph — same row without a screen-wide gap, or a new row at the same left margin — and a
+> result that reads like a label rather than prose (a word or two, no sentence punctuation) is
+> shown in the log but never spoken.
+
+> **Two switches, not one.** A calibrated dialogue region does nothing on its own — **Speak
+> dialogue** governs the whole pipeline, and with it off no dialogue OCR runs at all. Draw a
+> dialogue region in F9 and GrimoireAssist now offers to turn narration on for you; the dialogue
+> log also says which of the two is missing whenever it is empty.
+
 ### The dialogue log
 
 **☰ → Speech → Show dialogue log** docks a running transcript **above** the monster cards, in
@@ -355,13 +377,28 @@ the tracking view's own colours. The **newest line sits at the top**, so the lin
 always against the top edge — glanceable mid-fight without chasing a scrollbar.
 
 Each entry is banded against its neighbours so adjacent lines never run together, and carries a
-`[HH:MM:SS]` timestamp set in a smaller, dimmer type than the prose it belongs to. The banding
+`[HH:MM:SS]` timestamp set in a smaller, dimmer type than the prose it belongs to. A box **header
+or speaker label** — `Heart-to-Heart Info`, `Male BLADE` — is shown in amber ahead of the line but
+is **never spoken**, since hearing the label read out before every line gets old fast.
+
+A first line counts as a header only if it is short and doesn't end like a sentence, *and* it is
+either set apart from the prose vertically or drawn in a different colour. Colour is compared as
+hue rather than brightness: on a real capture a speaker label sat 23 units from the body in raw
+RGB while body lines sat 20 apart from each other — no separation at all — where by hue the same
+label sits 0.028 against 0.002 of body-to-body noise. Both guards stay mandatory so a wrapped
+sentence ("The supply drop landed" / "somewhere north of the barracks") is never mistaken for a
+label and silently dropped from the narration. The banding
 follows the entry itself, so a line keeps its shade as newer statements push it down.
 
 **Click any line to pick it** — it highlights — then **↻ Replay** speaks it again; double-clicking
 a line replays it in one go. Clicking the picked line again unpicks it. Handy when a line was
 drowned out by a fight, or you want to hear an NPC's hint a second time. Replay honours Mute: with
 narration muted it says so in the status bar rather than silently doing nothing.
+
+The strip belongs to the **Tracking view only** — switching to the Grimoire view hides it so the
+page gets the whole pane. (The input preview PiP is different on purpose: it is a camera monitor,
+so it floats over both views.) Turning the log on while the Grimoire is up is remembered and takes
+effect when you switch back, and the transcript is kept either way — nothing is lost while hidden.
 
 **Drag the grip along the bottom edge** to resize the box (56–600px); the height is written to
 `ui.dialogue_height` on release, so it survives restarts.
@@ -466,6 +503,7 @@ ui:
   always_on_top: false
   auto_start_tracking: false       # start OCR tracking as soon as the app opens
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
+  mute_hotkey: ctrl+shift+m        # system-wide mute/unmute for the narration
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
   show_controller_map: false       # controller button map over the main pane (🎮)
@@ -541,9 +579,16 @@ The two `monster_persist_*` values are optional per-game overrides of the global
 | F11        | Toggle fullscreen       | in-app |
 | Ctrl+R     | Open the video review   | in-app |
 | Ctrl+Alt+S | Save frame snapshot     | **system-wide** (StreamDeck / macro-key friendly; configurable via `ui.snapshot_hotkey`) |
+| Ctrl+Shift+M | Mute / unmute narration | **system-wide** (configurable via `ui.mute_hotkey`) |
 
-If the snapshot combination is already taken by another app, GrimoireAssist falls back to an
-in-app shortcut and says so in the status bar — pick a different `ui.snapshot_hotkey` in that case.
+Mute is system-wide for the case it exists for: someone walks in mid-cutscene and the voice has to
+stop *now*, with the game fullscreen and GrimoireAssist buried behind it. It toggles, so the same
+key brings the voice back, and the status bar confirms which way it went.
+
+If either combination is already taken by another app, GrimoireAssist falls back to an in-app
+shortcut and says so in the status bar — pick a different `ui.snapshot_hotkey` / `ui.mute_hotkey`
+in that case. (`Ctrl+Alt+M` would have been the obvious mute default but is commonly claimed by
+other software, hence `Ctrl+Shift+M`.)
 
 ## How it works
 

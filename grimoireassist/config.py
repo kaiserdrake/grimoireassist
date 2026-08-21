@@ -120,6 +120,7 @@ class UiConfig:
     always_on_top: bool = False
     auto_start_tracking: bool = False   # start OCR tracking as soon as the app opens
     snapshot_hotkey: str = "ctrl+alt+s"  # system-wide hotkey that saves a frame snapshot
+    mute_hotkey: str = "ctrl+shift+m"   # system-wide hotkey that toggles narration mute
     browser_split_ratio: float = 0.5    # main-pane share of the splitter when the browser is open
     search_engine: str = "google"       # default engine for non-address browser queries
     show_input_preview: bool = False    # live PiP of the raw capture frames over the tracking view
@@ -395,6 +396,7 @@ class Config:
                 always_on_top=bool(ui.get("always_on_top", False)),
                 auto_start_tracking=bool(ui.get("auto_start_tracking", False)),
                 snapshot_hotkey=str(ui.get("snapshot_hotkey", "ctrl+alt+s")),
+                mute_hotkey=str(ui.get("mute_hotkey", "ctrl+shift+m")),
                 browser_split_ratio=float(ui.get("browser_split_ratio", 0.5)),
                 search_engine=str(ui.get("search_engine", "google")),
                 show_input_preview=bool(ui.get("show_input_preview", False)),
@@ -509,6 +511,7 @@ class Config:
                 "always_on_top": self.ui.always_on_top,
                 "auto_start_tracking": self.ui.auto_start_tracking,
                 "snapshot_hotkey": self.ui.snapshot_hotkey,
+                "mute_hotkey": self.ui.mute_hotkey,
                 "browser_split_ratio": self.ui.browser_split_ratio,
                 "search_engine": self.ui.search_engine,
                 "show_input_preview": self.ui.show_input_preview,

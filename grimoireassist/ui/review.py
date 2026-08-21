@@ -91,18 +91,31 @@ class _VideoView(QWidget):
         super().wheelEvent(ev)
 
 
+_MARKER_GRAB = 7   # px either side of a trim handle that counts as grabbing it
+
+
 class _ScrubBar(QSlider):
     """Frame-index slider that jumps straight to a clicked position.
 
     A stock QSlider pages towards the click; for a video timeline the pointer
     position *is* the wanted frame, and holding the button then drags from
     there. Value changes are reported through the usual `valueChanged`.
+
+    It also carries the two trim markers. They live here rather than in a
+    separate widget so they share one coordinate system with the playhead —
+    a marker and the frame it points at can never drift apart.
     """
+
+    markers_changed = pyqtSignal(int, int)   # in-point, out-point (frame indices)
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keys are handled by the overlay
         self.setFixedHeight(22)
+        self.setMouseTracking(True)      # for the hover cursor over a handle
+        self._in = 0
+        self._out = 0
+        self._drag: Optional[str] = None
         self.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 6px; background: #2a2a36; border-radius: 3px;
@@ -122,19 +135,93 @@ class _ScrubBar(QSlider):
         ratio = min(max(x / span, 0.0), 1.0)
         return self.minimum() + round(ratio * (self.maximum() - self.minimum()))
 
+    def _x_at(self, value: int) -> int:
+        """Inverse of _value_at: the pixel a frame index sits at."""
+        lo, hi = self.minimum(), self.maximum()
+        span = max(1, hi - lo)
+        ratio = min(max((value - lo) / span, 0.0), 1.0)
+        return round(ratio * max(1, self.width() - 1))
+
+    # ---- trim markers ----------------------------------------------------
+    def set_markers(self, start: int, end: int) -> None:
+        self._in = max(self.minimum(), min(int(start), self.maximum()))
+        self._out = max(self.minimum(), min(int(end), self.maximum()))
+        self.update()
+
+    def markers(self) -> tuple:
+        return (self._in, self._out)
+
+    def _marker_hit(self, x: int) -> Optional[str]:
+        """Which marker handle (if any) a press at `x` grabs.
+
+        The nearer handle wins so the two stay independently grabbable when they
+        sit close together."""
+        near = [(abs(x - self._x_at(self._in)), "in"),
+                (abs(x - self._x_at(self._out)), "out")]
+        near.sort()
+        distance, which = near[0]
+        return which if distance <= _MARKER_GRAB else None
+
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
-            self.setValue(self._value_at(int(ev.position().x())))
+            x = int(ev.position().x())
+            self._drag = self._marker_hit(x)
+            if self._drag is not None:
+                self._move_marker(x)
+            else:
+                self.setValue(self._value_at(x))
             ev.accept()
             return
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
         if ev.buttons() & Qt.MouseButton.LeftButton:
-            self.setValue(self._value_at(int(ev.position().x())))
+            x = int(ev.position().x())
+            if self._drag is not None:
+                self._move_marker(x)
+            else:
+                self.setValue(self._value_at(x))
             ev.accept()
             return
+        # hover feedback so the handles announce themselves
+        self.setCursor(Qt.CursorShape.SizeHorCursor
+                       if self._marker_hit(int(ev.position().x()))
+                       else Qt.CursorShape.ArrowCursor)
         super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        self._drag = None
+        super().mouseReleaseEvent(ev)
+
+    def _move_marker(self, x: int) -> None:
+        """Drag one marker, pushing the other aside rather than crossing it."""
+        value = self._value_at(x)
+        if self._drag == "in":
+            self._in = min(value, self._out)
+        else:
+            self._out = max(value, self._in)
+        self.markers_changed.emit(self._in, self._out)
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)
+        if self.maximum() <= self.minimum():
+            return
+        p = QPainter(self)
+        x_in, x_out = self._x_at(self._in), self._x_at(self._out)
+        mid = self.height() // 2
+        # Dim what falls outside the selection, so the kept span reads as the
+        # subject rather than the selection reading as an annotation.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(12, 12, 18, 150))
+        if x_in > 0:
+            p.drawRect(QRect(0, mid - 3, x_in, 6))
+        if x_out < self.width():
+            p.drawRect(QRect(x_out, mid - 3, self.width() - x_out, 6))
+        p.setBrush(QColor("#39c07a"))
+        for x in (x_in, x_out):
+            p.drawRect(QRect(min(max(x - 2, 0), self.width() - 4), 1, 4, self.height() - 2))
+        p.end()
 
 
 class _ExportWorker(QThread):
@@ -145,19 +232,23 @@ class _ExportWorker(QThread):
     failed = pyqtSignal(str)
     stopped = pyqtSignal()
 
-    def __init__(self, snapshot: BufferSnapshot, path: Path, parent=None) -> None:
+    def __init__(self, snapshot: BufferSnapshot, path: Path, parent=None,
+                 start: int = 0, end: Optional[int] = None) -> None:
         super().__init__(parent)
         # Its own file handles, so a long export doesn't serialise against the
         # scrubbing reads on the GUI thread.
         self._snap = snapshot.independent_reader()
         self._path = path
+        self._start = start
+        self._end = end
         self.cancel = threading.Event()
 
     def run(self) -> None:
         try:
             out = export(self._snap, self._path,
                          progress=lambda i, n: self.progressed.emit(i, n),
-                         cancel=self.cancel)
+                         cancel=self.cancel,
+                         start=self._start, end=self._end)
         except ExportCancelled:
             self.stopped.emit()
         except Exception as exc:
@@ -186,6 +277,10 @@ class ReviewOverlay(QWidget):
         self._play_origin = 0.0      # monotonic time when playback started
         self._play_rel = 0.0         # buffer time at that moment
         self._export: Optional[_ExportWorker] = None
+        # Trim markers, as inclusive frame indices. They start spanning the whole
+        # buffer, so Save clip behaves exactly as it did before anyone touches them.
+        self._in_point = 0
+        self._out_point = max(0, len(snapshot) - 1)
 
         self.setAutoFillBackground(True)
         self.setStyleSheet("QWidget { background: #15151b; }")
@@ -202,6 +297,7 @@ class ReviewOverlay(QWidget):
         self._sync_scrub()
         self._render_current()
         self._update_labels()
+        self._sync_trim_ui()
 
     # ================= construction =================
     def _build_ui(self) -> None:
@@ -238,8 +334,16 @@ class ReviewOverlay(QWidget):
         self._status.setStyleSheet("color:#6b6b75; font-size:11px;")
         row.addWidget(self._status)
 
+        self._frame_btn = QPushButton("🖼  Save frame")
+        self._frame_btn.setToolTip("Write the frame on screen to a PNG (F)")
+        self._frame_btn.clicked.connect(self._on_save_frame)
+        self._frame_btn.setEnabled(bool(self._snap))
+        row.addWidget(self._frame_btn)
+
         self._save_btn = QPushButton("💾  Save clip")
-        self._save_btn.setToolTip("Write everything in the buffer to a video file")
+        self._save_btn.setToolTip(
+            "Write the marked span to a video file — drag the green trim "
+            "handles on the timeline, or press [ and ]")
         self._save_btn.clicked.connect(self._on_save_clicked)
         self._save_btn.setEnabled(bool(self._snap))
         row.addWidget(self._save_btn)
@@ -268,6 +372,8 @@ class ReviewOverlay(QWidget):
         self._scrub.setSingleStep(1)
         self._scrub.setEnabled(bool(self._snap))
         self._scrub.valueChanged.connect(self._on_scrub_changed)
+        self._scrub.set_markers(self._in_point, self._out_point)
+        self._scrub.markers_changed.connect(self._on_markers_dragged)
         outer.addWidget(self._scrub)
 
         row = QHBoxLayout()
@@ -293,6 +399,12 @@ class ReviewOverlay(QWidget):
         transport("|▶", "Next frame (→)", lambda: self._step(1))
         transport("⏭", "Jump to the newest frame (End)",
                   lambda: self._seek_index(len(self._snap) - 1))
+
+        row.addSpacing(12)
+        transport("[", "Trim the start to this frame ([)", self._mark_in)
+        transport("]", "Trim the end to this frame (])", self._mark_out)
+        self._reset_trim_btn = transport(
+            "⤢", "Clear the trim — save the whole buffer (backslash)", self._clear_trim)
 
         row.addSpacing(12)
         self._time_label = QLabel("0:00 / 0:00")
@@ -418,7 +530,75 @@ class ReviewOverlay(QWidget):
             self._wall_label.setText(
                 f"  ·  {wall.strftime('%H:%M:%S')}  ·  frame {self._index + 1}/{len(self._snap)}")
 
+    # ================= trim markers =================
+    def _trimmed(self) -> bool:
+        """Whether the markers select less than the whole buffer."""
+        return (self._in_point, self._out_point) != (0, max(0, len(self._snap) - 1))
+
+    def _trim_duration_s(self) -> float:
+        return max(0.0, self._snap.rel_time(self._out_point)
+                   - self._snap.rel_time(self._in_point))
+
+    def _set_trim(self, start: int, end: int) -> None:
+        last = max(0, len(self._snap) - 1)
+        self._in_point = max(0, min(int(start), last))
+        self._out_point = max(0, min(int(end), last))
+        if self._out_point < self._in_point:
+            self._in_point, self._out_point = self._out_point, self._in_point
+        self._scrub.set_markers(self._in_point, self._out_point)
+        self._sync_trim_ui()
+
+    def _mark_in(self) -> None:
+        """Trim the start to the current frame, carrying the end along if the
+        playhead has already passed it."""
+        self._set_trim(self._index, max(self._out_point, self._index))
+
+    def _mark_out(self) -> None:
+        self._set_trim(min(self._in_point, self._index), self._index)
+
+    def _clear_trim(self) -> None:
+        self._set_trim(0, max(0, len(self._snap) - 1))
+
+    def _on_markers_dragged(self, start: int, end: int) -> None:
+        self._in_point, self._out_point = start, end
+        self._sync_trim_ui()
+
+    def _sync_trim_ui(self) -> None:
+        """Keep the Save button honest about what it is about to write."""
+        if self._export is not None:
+            return                      # mid-save: the button says Cancel
+        if self._trimmed():
+            self._save_btn.setText(
+                f"💾  Save clip ({_fmt_clock(self._trim_duration_s())})")
+        else:
+            self._save_btn.setText("💾  Save clip")
+        self._reset_trim_btn.setEnabled(bool(self._snap) and self._trimmed())
+
     # ================= save =================
+    def _on_save_frame(self) -> None:
+        """Write the frame on screen to a PNG beside the saved clips."""
+        if not self._snap:
+            self._status.setText("Nothing to save yet.")
+            return
+        img = self._snap.frame(self._index)
+        if img is None:
+            self._status.setText("That frame could not be read back.")
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = self._recordings_dir / f"frame_{ts}.png"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # cv2.imwrite takes no non-ASCII paths on Windows; encode and write
+            # the bytes ourselves so a username with an accent still works.
+            ok, buf = cv2.imencode(".png", img)
+            if not ok:
+                raise RuntimeError("the frame could not be encoded")
+            target.write_bytes(buf.tobytes())
+        except Exception as exc:
+            self._status.setText(f"Could not save the frame: {exc}")
+            return
+        self._status.setText(f"Saved {target.name}")
+
     def _on_save_clicked(self) -> None:
         if self._export is not None:
             self._export.cancel.set()
@@ -429,7 +609,8 @@ class ReviewOverlay(QWidget):
             return
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         target = self._recordings_dir / f"review_{ts}.mp4"
-        self._export = _ExportWorker(self._snap, target, parent=self)
+        self._export = _ExportWorker(self._snap, target, parent=self,
+                                     start=self._in_point, end=self._out_point)
         self._export.progressed.connect(self._on_export_progress)
         self._export.saved.connect(self._on_export_saved)
         self._export.failed.connect(self._on_export_failed)
@@ -437,7 +618,7 @@ class ReviewOverlay(QWidget):
         self._export.finished.connect(self._on_export_finished)
         self._save_btn.setText("✕  Cancel save")
         self._status.setText(
-            f"Saving {_fmt_clock(self._snap.duration_s)} of video…")
+            f"Saving {_fmt_clock(self._trim_duration_s())} of video…")
         self._export.start()
 
     def _on_export_progress(self, done: int, total: int) -> None:
@@ -455,7 +636,7 @@ class ReviewOverlay(QWidget):
 
     def _on_export_finished(self) -> None:
         self._export = None
-        self._save_btn.setText("💾  Save clip")
+        self._sync_trim_ui()          # restores the label, trim duration and all
 
     def _open_recordings_folder(self) -> None:
         import subprocess
@@ -480,6 +661,14 @@ class ReviewOverlay(QWidget):
             self._seek_index(0)                    # jumping doesn't pause, as on ⏮
         elif key == Qt.Key.Key_End:
             self._seek_index(len(self._snap) - 1)
+        elif key == Qt.Key.Key_BracketLeft:
+            self._mark_in()
+        elif key == Qt.Key.Key_BracketRight:
+            self._mark_out()
+        elif key == Qt.Key.Key_Backslash:
+            self._clear_trim()
+        elif key == Qt.Key.Key_F:
+            self._on_save_frame()
         else:
             super().keyPressEvent(ev)
             return

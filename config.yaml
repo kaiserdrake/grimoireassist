@@ -1,6 +1,6 @@
 selected_game: mhs3
 capture:
-  device_index: 0
+  device_index: 1
   width: 1920
   height: 1080
   fps: 30
@@ -22,6 +22,7 @@ ui:
   always_on_top: false
   auto_start_tracking: true
   snapshot_hotkey: ctrl+alt+s
+  mute_hotkey: ctrl+alt+m
   browser_split_ratio: 0.33507306889352817
   search_engine: google
   show_input_preview: true
@@ -36,7 +37,8 @@ ui:
   controller_map_y: 0.9827814569536424
   controller_map_collapsed: false
   dialogue_collapsed: false
-  dialogue_test_box: true
+  dialogue_test_box: false
+  dialogue_height: 325
 review:
   enabled: true
   minutes: 30.0
@@ -45,7 +47,7 @@ review:
   jpeg_quality: 75
   max_disk_mb: 4096
 speech:
-  enabled: false
+  enabled: true
   muted: false
   backend: auto
   voice_online: en-GB-RyanNeural

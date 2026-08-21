@@ -60,6 +60,7 @@ _TRACKING_FG = "#e8e8ec"
 # push it down.
 _DIALOGUE_ROWS = ("#15151b", "#1c1c26")
 _DIALOGUE_STAMP = "#7f7f93"      # timestamp: present but never competing with the prose
+_DIALOGUE_HEADER = "#e0a94f"     # box header / speaker label: shown, never spoken
 _DIALOGUE_SELECTED = "#33335a"   # the picked line, for replaying it
 _DIALOGUE_MAX_LINES = 200
 
@@ -191,10 +192,13 @@ class MainWindow(QMainWindow):
         self._debug_widget.setVisible(False)
         # Transcript entries as (sequence, timestamp, text), newest first. Held
         # apart from the widget so the log can be re-rendered with stable banding.
-        self._dialogue_entries: Deque[Tuple[int, str, str]] = deque(
+        self._dialogue_entries: Deque[Tuple[int, str, str, str]] = deque(
             maxlen=_DIALOGUE_MAX_LINES)
         self._dialogue_seq = 0
         self._dialogue_selected: Optional[int] = None   # picked entry's sequence
+        # What the user asked for, which is not the same as what is on screen:
+        # the strip belongs to the tracking view and stays hidden on the Grimoire.
+        self._dialogue_wanted = False
         self._dialogue_widget = self._build_dialogue_panel()
         self._dialogue_widget.setVisible(False)
 
@@ -364,6 +368,9 @@ class MainWindow(QMainWindow):
         wlay.addWidget(self.panel, 1)
         wlay.addWidget(self._debug_widget)
         self._set_main_widget(wrapper)
+        # The wrapper is rebuilt per game, so re-assert the strip's visibility
+        # rather than relying on it surviving the re-parent.
+        self._apply_dialogue_visibility()
         self._refresh_panel()
 
         # Only (re)start the OCR worker if tracking was already active.
@@ -730,7 +737,8 @@ class MainWindow(QMainWindow):
         self.act_speech.setToolTip(
             "Read the dialogue region aloud (set the region with Calibrate regions)")
         self.act_speech.toggled.connect(self._toggle_speech)
-        self.act_mute = self.menu.addAction("Mute narration")
+        _mute_label = self.cfg.ui.mute_hotkey.replace(" ", "").title()
+        self.act_mute = self.menu.addAction(f"Mute narration	{_mute_label}")
         self.act_mute.setCheckable(True)
         self.act_mute.setChecked(self.cfg.speech.muted)
         self.act_mute.setToolTip("Silence the voice; keep detecting and logging")
@@ -767,8 +775,10 @@ class MainWindow(QMainWindow):
         rate_menu = self.menu.addMenu("Voice speed")
         rate_group = QActionGroup(rate_menu)
         rate_group.setExclusive(True)
-        for value, label in ((-4, "Slower"), (-2, "Slow"), (0, "Normal"),
-                             (2, "Fast"), (4, "Faster")):
+        # Narration competes with the game for your attention, so the useful
+        # range runs upwards from normal — nobody has asked for it slower.
+        for value, label in ((0, "Normal"), (2, "Fast"), (4, "Faster"),
+                             (6, "Very fast"), (8, "Fastest")):
             act = QAction(label, rate_menu)
             act.setCheckable(True)
             act.setChecked(self.cfg.speech.rate == value)
@@ -1018,6 +1028,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Could not register global hotkey '{seq}' (in use by another app?)"
                 " — snapshot works only while this window has focus", 8000)
+
+        # Mute is the one control worth reaching for without leaving the game:
+        # someone walks in mid-cutscene and the voice has to stop now, with the
+        # app buried behind a fullscreen window. Same system-wide registration.
+        self._mute_hotkey = GlobalHotkey(self._toggle_mute)
+        mute_seq = self.cfg.ui.mute_hotkey
+        if mute_seq and not self._mute_hotkey.register(mute_seq):
+            QShortcut(QKeySequence(mute_seq), self, activated=self._toggle_mute)
+            self.statusBar().showMessage(
+                f"Could not register global hotkey '{mute_seq}' (in use by another"
+                " app?) — mute works only while this window has focus", 8000)
 
     # ================= debug log =================
     def _open_log_file(self):
@@ -1450,8 +1471,10 @@ class MainWindow(QMainWindow):
             self.speaker.stop()
             self.speaker = None
 
-    @pyqtSlot(str)
-    def _on_dialogue_text(self, text: str) -> None:
+    # Must match the signal's two arguments: a @pyqtSlot(str) here silently
+    # drops the header Qt is passing, and it arrives as the default "".
+    @pyqtSlot(str, str)
+    def _on_dialogue_text(self, text: str, header: str = "") -> None:
         """A finished statement from the dialogue region.
 
         Always logged and shown; spoken only when not muted."""
@@ -1460,7 +1483,7 @@ class MainWindow(QMainWindow):
         self._dialogue_seq += 1
         # appendleft keeps the newest first; the deque's maxlen then drops the
         # OLDEST entry off the far end, which is the only correct direction.
-        self._dialogue_entries.appendleft((self._dialogue_seq, ts, text))
+        self._dialogue_entries.appendleft((self._dialogue_seq, ts, header, text))
         self._render_dialogue_log()
         tag = "muted" if self.cfg.speech.muted else (
             self.speaker.current_backend() if self.speaker else "off")
@@ -1474,16 +1497,24 @@ class MainWindow(QMainWindow):
         Each row is banded by its own sequence number rather than its position,
         so a line keeps the same shade as newer statements push it down — banding
         by position would make every row flip shade on each new line."""
+        if not self._dialogue_entries:
+            self._dialogue_log.setHtml(self._dialogue_placeholder())
+            return
         rows = []
-        for seq, ts, text in self._dialogue_entries:
+        for seq, ts, header, text in self._dialogue_entries:
             picked = seq == self._dialogue_selected
+            label = ('<span style="color:{c}; font-size:10pt; font-weight:600;">'
+                     ' {h}</span>'.format(c=_DIALOGUE_HEADER,
+                                          h=html.escape(header))
+                     if header else "")
             rows.append(
                 '<tr><td style="background:{bg}; padding:4px 7px;">'
                 '<a href="{seq}" style="text-decoration:none;">'
                 '<span style="color:{stamp}; font-size:10pt;">[{ts}]</span>'
+                '{label}'
                 '<span style="font-size:13pt; color:{fg};"> {text}</span>'
                 '</a></td></tr>'.format(
-                    seq=seq,
+                    seq=seq, label=label,
                     bg=(_DIALOGUE_SELECTED if picked
                         else _DIALOGUE_ROWS[seq % len(_DIALOGUE_ROWS)]),
                     stamp="#c8c8e0" if picked else _DIALOGUE_STAMP,
@@ -1493,6 +1524,29 @@ class MainWindow(QMainWindow):
             ' style="font-family:Segoe UI, sans-serif;">{}</table>'.format(
                 "".join(rows)))
         self._dialogue_log.verticalScrollBar().setValue(0)   # newest is at the top
+
+    def _dialogue_placeholder(self) -> str:
+        """What an empty transcript says.
+
+        An empty box is ambiguous — off, mis-aimed, or just quiet? — and the
+        commonest cause of "it never detects anything" is simply that no
+        dialogue region has been drawn for this game, which is otherwise
+        reported only by a status-bar message at the moment speech is switched
+        on. Say which of the three it is, every time."""
+        if not self.cfg.speech.enabled:
+            note = ("Narration is off. Turn on <b>Speak dialogue</b> "
+                    "in the menu to start reading the dialogue box.")
+        elif not self.cfg.ocr.regions_dialogue.is_set():
+            game = getattr(self, "game", None)
+            where = f" for {game.name}" if game is not None else ""
+            note = (f"No dialogue region set{where}. Press <b>F9</b> and draw the "
+                    "<b>dialogue</b> region over the game's dialogue box — "
+                    "regions are saved per game.")
+        else:
+            note = "Listening for dialogue…"
+        return (
+            '<div style="font-family:Segoe UI, sans-serif; font-size:11pt;'
+            ' color:#8a8a99; padding:8px 7px;">{}</div>'.format(note))
 
     def _clear_dialogue_log(self) -> None:
         self._dialogue_entries.clear()
@@ -1515,7 +1569,7 @@ class MainWindow(QMainWindow):
 
         Mute is honoured — silently replaying into a muted session would just
         look broken — so say why nothing happened instead."""
-        for entry_seq, _ts, text in self._dialogue_entries:
+        for entry_seq, _ts, _header, text in self._dialogue_entries:
             if entry_seq != seq:
                 continue
             self._dialogue_selected = seq
@@ -1559,6 +1613,15 @@ class MainWindow(QMainWindow):
                 self._push_idle_regions()
         self._sync_speech_ui()
 
+    def _toggle_mute(self) -> None:
+        """Flip mute — what the global hotkey fires.
+
+        Reads the config rather than the button so it stays right no matter
+        which surface last changed it (menu, button, or an earlier press)."""
+        self._set_muted(not self.cfg.speech.muted)
+        state = "muted" if self.cfg.speech.muted else "unmuted"
+        self.statusBar().showMessage(f"Dialogue narration {state}", 3000)
+
     def _set_muted(self, muted: bool) -> None:
         """Silence the audio while leaving detection, the log and the panel alone."""
         if self.cfg.speech.muted == muted and self.mute_btn.isChecked() == muted:
@@ -1572,9 +1635,11 @@ class MainWindow(QMainWindow):
     def _update_mute_btn(self) -> None:
         muted = self.cfg.speech.muted
         self.mute_btn.setText("🔇 Muted" if muted else "🔊 Speak")
+        key = (self.cfg.ui.mute_hotkey or "").replace(" ", "").title()
+        via = f" ({key} anywhere)" if key else ""
         self.mute_btn.setToolTip(
-            "Narration muted — dialogue is still detected and logged"
-            if muted else "Narration on — click to mute")
+            f"Narration muted — dialogue is still detected and logged{via}"
+            if muted else f"Narration on — click to mute{via}")
 
     def _sync_speech_ui(self) -> None:
         """Keep the Mute button and its menu twin showing the same state."""
@@ -1668,7 +1733,18 @@ class MainWindow(QMainWindow):
             self.speaker.flush()
 
     def _toggle_dialogue_panel(self, visible: bool) -> None:
-        self._dialogue_widget.setVisible(visible)
+        self._dialogue_wanted = bool(visible)
+        self._apply_dialogue_visibility()
+
+    def _apply_dialogue_visibility(self) -> None:
+        """Show the strip only on the tracking view, and only if it was asked for.
+
+        Unlike the PiP — a camera monitor that deliberately floats over both
+        views — the transcript is part of the tracking surface, so the Grimoire
+        gets the whole pane. Toggling it on while the Grimoire is up is
+        remembered and takes effect on the way back."""
+        self._dialogue_widget.setVisible(
+            self._dialogue_wanted and not self._grimoire_shown)
         self._sync_preview_inset()
 
     def _on_dialogue_resized(self, height: int) -> None:
@@ -1928,6 +2004,7 @@ class MainWindow(QMainWindow):
         self._grimoire_shown = visible
         if self.panel:
             self.panel.set_grimoire_visible(visible)
+        self._apply_dialogue_visibility()
         self._update_grimoire_btn()
         self._sync_controller_map()
 
@@ -1964,6 +2041,24 @@ class MainWindow(QMainWindow):
                 self.cfg.set_regions_for(self.cfg.selected_game, gs)
             self.cfg.save()
             self.statusBar().showMessage("Regions saved", 2000)
+            self._offer_narration()
+
+    def _offer_narration(self) -> None:
+        """Having just drawn a dialogue region, offer to switch narration on.
+
+        Drawing that region is the clearest statement of intent there is, and
+        it is otherwise possible to calibrate one, see nothing happen, and have
+        no idea that a separate switch governs the whole pipeline."""
+        if self.cfg.speech.enabled or not self.cfg.ocr.regions_dialogue.is_set():
+            return
+        answer = QMessageBox.question(
+            self, "Dialogue narration",
+            "A dialogue region is set, but narration is switched off, so "
+            "nothing will be read aloud.\n\nTurn dialogue narration on now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.act_speech.setChecked(True)     # drives _toggle_speech
 
     # ================= shutdown =================
     def closeEvent(self, event) -> None:
@@ -1978,6 +2073,8 @@ class MainWindow(QMainWindow):
             self.cfg.save()
         if getattr(self, "_snapshot_hotkey", None):
             self._snapshot_hotkey.unregister()
+        if getattr(self, "_mute_hotkey", None):
+            self._mute_hotkey.unregister()
         # Stop the recorder before capture, so no frame arrives for a buffer
         # whose segment files have already been removed.
         self._stop_recorder(confirm=False)

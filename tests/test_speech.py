@@ -5,6 +5,8 @@ asked to say and can be told to fail on demand.
 """
 import time
 
+import pytest
+
 from grimoireassist.speech import (
     Speaker, _rank, is_wanted_lcid, is_wanted_locale, pick_voice,
 )
@@ -304,3 +306,74 @@ def test_voices_come_from_the_resolved_backend():
         assert spk.voices() == ["sapi-voice"]
     finally:
         spk.stop()
+
+
+# ------------------------------------------------- recovering from failures
+def test_a_construction_failure_is_not_cached_forever():
+    """A transient failure must not pin the session to the offline voice.
+
+    The retry window exists precisely so the online voice can come back; caching
+    the failed instance would defeat it silently."""
+    speaker = Speaker(backend="sapi")     # no threads doing real work needed
+    try:
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("transient network failure")
+            return object()
+
+        speaker._factories["edge"] = flaky
+        speaker._instances.pop("edge", None)
+        assert speaker._instance("edge") is None      # first attempt fails
+        assert speaker._instance("edge") is not None  # second one recovers
+        assert len(calls) == 2
+    finally:
+        speaker.stop()
+
+
+def test_a_successful_backend_is_cached():
+    speaker = Speaker(backend="sapi")
+    try:
+        calls = []
+
+        def once():
+            calls.append(1)
+            return object()
+
+        speaker._factories["edge"] = once
+        speaker._instances.pop("edge", None)
+        first = speaker._instance("edge")
+        assert speaker._instance("edge") is first
+        assert len(calls) == 1                        # built once, reused after
+    finally:
+        speaker.stop()
+
+
+def test_the_online_backend_survives_an_unwritable_install_dir(tmp_path):
+    """A portable copy unzipped somewhere read-only must not lose the online
+    voice — that is what leaves only offline voices in the menu."""
+    pytest.importorskip("edge_tts")
+    from grimoireassist.speech import EdgeNeuralBackend
+    backend = EdgeNeuralBackend(cache_dir="Z:/no-such-drive/tts")
+    resolved = backend._clip_dir()                    # must not raise
+    assert resolved.is_dir()
+    assert "no-such-drive" not in str(resolved)       # fell back elsewhere
+
+
+def test_a_writable_cache_dir_is_used_as_given(tmp_path):
+    pytest.importorskip("edge_tts")
+    from grimoireassist.speech import EdgeNeuralBackend
+    wanted = tmp_path / "tts"
+    backend = EdgeNeuralBackend(cache_dir=wanted)
+    assert backend._clip_dir() == wanted
+
+
+def test_constructing_the_online_backend_touches_no_disk(tmp_path):
+    """Directory work belongs in _clip_dir, not __init__."""
+    pytest.importorskip("edge_tts")
+    from grimoireassist.speech import EdgeNeuralBackend
+    wanted = tmp_path / "not-created-yet"
+    EdgeNeuralBackend(cache_dir=wanted)
+    assert not wanted.exists()
