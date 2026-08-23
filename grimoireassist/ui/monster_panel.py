@@ -17,10 +17,7 @@ from urllib.parse import quote
 
 from pathlib import Path
 
-from PyQt6.QtCore import (
-    QEasingCurve, QRectF, Qt, QUrl, QVariantAnimation, pyqtSignal,
-)
-from PyQt6.QtGui import QColor, QFontMetrics, QPainter
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -267,89 +264,6 @@ class MonsterNav(QWidget):
             btn.clicked.connect(lambda _c, n=name: self._select(n))
             self._btn_row.addWidget(btn)
             self._buttons.append(btn)
-
-
-class AutoSwitchToggle(QWidget):
-    """Sliding ON/OFF toggle for the Auto Switch behavior.
-
-    When ON, the main window follows OCR detections (tracking view while
-    monsters are seen, Grimoire after the idle timeout). When OFF, the view
-    only changes when the user picks it by hand. This is independent from the
-    manual Grimoire view button — showing the Grimoire never flips this toggle.
-    A highlight slides behind the active state."""
-
-    toggled = pyqtSignal(bool)  # True = Auto Switch on
-
-    _LABELS = ("Auto On", "Auto Off")
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._on = True
-        self._knob = 0.0   # highlight position: 0 = On (left), 1 = Off (right)
-        self._anim = QVariantAnimation(self, duration=140)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.valueChanged.connect(self._on_anim)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        self.setToolTip("Auto Switch: follow OCR detections to the tracking view")
-        f = self.font()
-        f.setPixelSize(12)
-        self.setFont(f)
-        # each half fits the widest label (bold, so the active state doesn't clip)
-        f.setBold(True)
-        self._half = max(QFontMetrics(f).horizontalAdvance(t)
-                         for t in self._LABELS) + 24
-        self.setFixedSize(self._half * 2, 24)
-
-    def is_on(self) -> bool:
-        return self._on
-
-    def set_on(self, on: bool) -> None:
-        self._on = bool(on)
-        self._anim.stop()
-        self._anim.setStartValue(self._knob)
-        self._anim.setEndValue(0.0 if self._on else 1.0)
-        self._anim.start()
-
-    def _select(self, on: bool) -> None:
-        if on != self._on:
-            self.set_on(on)
-            self.toggled.emit(self._on)
-
-    def _on_anim(self, value) -> None:
-        self._knob = float(value)
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._select(event.position().x() < self._half)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return):
-            self._select(not self._on)
-        else:
-            super().keyPressEvent(event)
-
-    def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect())
-        radius = r.height() / 2
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#2a2a36"))
-        p.drawRoundedRect(r, radius, radius)
-        knob = QRectF(self._knob * self._half, 0, self._half, r.height())
-        # green highlight when on, muted grey when off
-        p.setBrush(QColor("#3f9a54") if self._on else QColor("#4a4a57"))
-        p.drawRoundedRect(knob.adjusted(2, 2, -2, -2), radius - 2, radius - 2)
-        active = 0 if self._on else 1
-        f = p.font()
-        for i, text in enumerate(self._LABELS):
-            seg = QRectF(i * self._half, 0, self._half, r.height())
-            f.setBold(i == active)
-            p.setFont(f)
-            p.setPen(QColor("#ffffff") if i == active else QColor("#cfcfd6"))
-            p.drawText(seg, Qt.AlignmentFlag.AlignCenter, text)
 
 
 class MonsterPanel(QWidget):

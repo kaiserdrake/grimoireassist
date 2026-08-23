@@ -32,10 +32,12 @@ ui:
   show_controller_map: true
   controller_map_left: switch
   controller_map_right: switch
-  controller_map_width: 382
-  controller_map_x: 0.9461538461538461
-  controller_map_y: 0.9827814569536424
+  controller_map_width: 673
+  controller_map_x: 0.7353648757016841
+  controller_map_y: 0.2896440129449838
   controller_map_collapsed: false
+  merge_overlays: true
+  overlay_tab: pad
   dialogue_collapsed: false
   dialogue_test_box: false
   dialogue_height: 325

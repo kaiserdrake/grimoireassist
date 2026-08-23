@@ -299,3 +299,35 @@ def test_ui_config_rejects_junk():
     assert ui.controller_map_x == 1.0
     assert ui.controller_map_y == 0.0
     assert ui.controller_map_width == MIN_WIDTH
+
+
+# ---- browser drawer ----------------------------------------------------
+def test_overlay_ignores_the_splitter_drawer(app):
+    """The overlay hangs off the central container, not the main pane, so
+    opening the browser drawer (which halves the pane) must not move it."""
+    from PyQt6.QtWidgets import QSplitter, QVBoxLayout
+
+    center = QWidget()
+    lay = QVBoxLayout(center)
+    lay.setContentsMargins(0, 0, 0, 0)
+    splitter = QSplitter(Qt.Orientation.Horizontal)
+    main_pane, drawer = QWidget(), QWidget()
+    splitter.addWidget(main_pane)
+    splitter.addWidget(drawer)
+    drawer.setVisible(False)
+    lay.addWidget(splitter)
+    center.resize(900, 600)
+    center.show()
+    app.processEvents()
+
+    overlay = ControllerMapOverlay(center, fx=1.0, fy=0.0)  # top-right corner
+    overlay.show()
+    app.processEvents()
+    before = overlay.pos()
+
+    drawer.setVisible(True)
+    splitter.setSizes([450, 450])
+    app.processEvents()
+    assert main_pane.width() < center.width()   # the pane really did shrink
+    assert overlay.pos() == before
+    center.close()

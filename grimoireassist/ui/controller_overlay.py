@@ -15,6 +15,13 @@ position is kept as a fraction of the free space so it holds its relative place
 The header strip names the current pair and carries a chevron that folds the
 diagram down to a compact pill, in place. `geometry_changed` and
 `collapsed_changed` fire once per gesture so the host can persist the state.
+
+It doubles as the *merged overlay panel*: `attach_guest()` takes the input
+preview in as a second page, and the header turns into a tab strip. One frame
+then carries both — one position, one width, one collapse — and the two pages
+take turns in the body. `detach_guest()` puts the preview back on its own. The
+pad diagram is itself just a page, so a panel with the pad map switched off is
+still a perfectly good home for the preview.
 """
 from __future__ import annotations
 
@@ -53,11 +60,21 @@ _DIAMOND_OFF = 46.0        # centre-to-centre distance out to each button
 
 _GRIP = 16                 # bottom-right resize handle, in real px
 
+# Page keys. The pad diagram is drawn by this widget; the input page is a guest
+# widget the host hands over (see attach_guest).
+PAD_TAB = "pad"
+INPUT_TAB = "input"
+_PAD_LABEL = "Pad"
+_INPUT_LABEL = "Input"
+_TAB_PAD = 18              # horizontal padding inside a tab cell
+_TAB_GAP = 4               # gap between tab cells
+
 _BACKDROP = QColor(14, 14, 20, 225)
 _BORDER = "#3a3a4a"
 _BORDER_HI = "#6a6a80"
 _MUTED = "#8a8a99"
 _TEXT = "#c8c8d2"
+_TAB_FILL = QColor(255, 255, 255, 26)   # chip behind the active tab
 
 
 def _clamp01(value: float) -> float:
@@ -68,10 +85,12 @@ def _clamp01(value: float) -> float:
 
 
 class ControllerMapOverlay(QWidget):
-    """Floating two-pad button reference over the parent's client area."""
+    """Floating panel over the parent's client area: the two-pad button
+    reference, plus optionally the input preview as a second tab."""
 
     geometry_changed = pyqtSignal(float, float, int)  # fx, fy, width
     collapsed_changed = pyqtSignal(bool)
+    tab_changed = pyqtSignal(str)  # "pad" | "input", once per tab click
 
     def __init__(self, parent: QWidget, left_id: str = DEFAULT_LEFT,
                  right_id: str = DEFAULT_RIGHT, width: int = DEFAULT_WIDTH,
@@ -81,6 +100,9 @@ class ControllerMapOverlay(QWidget):
         self._left: ControllerLayout = get_layout(left_id, DEFAULT_LEFT)
         self._right: ControllerLayout = get_layout(right_id, DEFAULT_RIGHT)
         self._collapsed = bool(collapsed)
+        self._guest: Optional[QWidget] = None  # docked input preview, or None
+        self._pad_enabled = True    # is the pad diagram offered as a page?
+        self._tab = PAD_TAB         # page currently in the body
         self._wanted = max(MIN_WIDTH, int(width))  # width the user asked for
         self._fx = _clamp01(fx)   # position as a fraction of the free space,
         self._fy = _clamp01(fy)   # so a resized host keeps it in proportion
@@ -115,13 +137,111 @@ class ControllerMapOverlay(QWidget):
     def is_collapsed(self) -> bool:
         return self._collapsed
 
+    # ---- pages -----------------------------------------------------------
+    def attach_guest(self, widget: QWidget) -> None:
+        """Take `widget` (the input preview) in as the second page. It becomes
+        a child of this panel, which from then on owns its size and position;
+        the widget only has to accept `set_docked`."""
+        if self._guest is widget:
+            return
+        self._guest = widget
+        widget.setParent(self)
+        widget.set_docked(True, self.width())
+        if hasattr(widget, "aspect_changed"):
+            widget.aspect_changed.connect(self._on_guest_aspect)
+        self._refit(keep_pos=True)
+        self.update()
+
+    def detach_guest(self, new_parent: QWidget) -> Optional[QWidget]:
+        """Hand the guest back to `new_parent`, undocked. Returns it (hidden,
+        as Qt hides any re-parented widget) so the caller can show it again."""
+        guest, self._guest = self._guest, None
+        if guest is None:
+            return None
+        if hasattr(guest, "aspect_changed"):
+            try:
+                guest.aspect_changed.disconnect(self._on_guest_aspect)
+            except TypeError:
+                pass
+        guest.setParent(new_parent)
+        guest.set_docked(False)
+        self._tab = PAD_TAB
+        self._refit(keep_pos=True)
+        self.update()
+        return guest
+
+    def has_guest(self) -> bool:
+        return self._guest is not None
+
+    def set_pad_enabled(self, enabled: bool) -> None:
+        """Offer the pad diagram as a page, or not. With it off the panel is
+        just a frame around the guest — which is what "input preview on, pad
+        map off, merged" should look like."""
+        enabled = bool(enabled)
+        if enabled == self._pad_enabled:
+            return
+        self._pad_enabled = enabled
+        self._ensure_tab()
+        self._refit(keep_pos=True)
+        self.update()
+
+    def tabs(self) -> list[tuple[str, str]]:
+        """The pages on offer right now, in header order."""
+        out = []
+        if self._pad_enabled:
+            out.append((PAD_TAB, _PAD_LABEL))
+        if self._guest is not None:
+            out.append((INPUT_TAB, _INPUT_LABEL))
+        return out
+
+    def active_tab(self) -> str:
+        return self._tab
+
+    def set_active_tab(self, key: str) -> None:
+        """Show a page without emitting — for restoring the saved tab."""
+        if key in [k for k, _ in self.tabs()] and key != self._tab:
+            self._tab = key
+            self._refit(keep_pos=True)  # the two pages have different aspects
+            self.update()
+
+    def _ensure_tab(self) -> None:
+        """Fall back to whatever page is still on offer."""
+        keys = [k for k, _ in self.tabs()]
+        if self._tab not in keys:
+            self._tab = keys[0] if keys else PAD_TAB
+
+    def _select_tab(self, key: str) -> None:
+        if key == self._tab:
+            return
+        self.set_active_tab(key)
+        self.tab_changed.emit(self._tab)
+
+    def _on_guest_aspect(self, _aspect: float) -> None:
+        """The capture ratio changed, so the body height did too."""
+        if self._tab == INPUT_TAB:
+            self._refit(keep_pos=True)
+
+    def _layout_guest(self) -> None:
+        """Fill the body with the guest while its tab is up, hide it otherwise
+        — hidden means its refresh timer stops, so the off tab costs nothing."""
+        if self._guest is None:
+            return
+        showing = self._tab == INPUT_TAB and not self._collapsed
+        if showing:
+            self._guest.set_docked(True, self.width())
+            self._guest.move(0, _HEADER_H)
+        self._guest.setVisible(showing)
+
     def geometry_setting(self) -> tuple[float, float, int]:
         """(fx, fy, width) — what the host persists to config."""
         return (self._fx, self._fy, self._wanted)
 
     def _title(self) -> str:
-        """Full pad names while expanded; short ones in the pill, where the
-        width is driven by the text itself."""
+        """Header text for a single-page panel. Full pad names while expanded;
+        short ones in the pill, where the width is driven by the text itself.
+        With two pages the tab strip replaces this entirely."""
+        if self._tab == INPUT_TAB:
+            return "Input" if self._collapsed else "Input preview"
         if self._collapsed:
             return f"{self._left.short} → {self._right.short}"
         return f"{self._left.name}  →  {self._right.name}"
@@ -132,16 +252,44 @@ class ControllerMapOverlay(QWidget):
         return font
 
     # ---- sizing ----------------------------------------------------------
+    def _tab_rects(self) -> list[tuple[str, QRect]]:
+        """Hit boxes for the tab strip, or [] when there is only one page and
+        the header shows a plain title instead."""
+        tabs = self.tabs()
+        if len(tabs) < 2:
+            return []
+        metrics = QFontMetrics(self._title_font())
+        out: list[tuple[str, QRect]] = []
+        x = 6
+        for key, label in tabs:
+            w = metrics.horizontalAdvance(label) + _TAB_PAD
+            out.append((key, QRect(x, 3, w, _HEADER_H - 6)))
+            x += w + _TAB_GAP
+        return out
+
     def _collapsed_width(self) -> int:
-        """The pill is only as wide as its title needs."""
+        """The pill is only as wide as its header content needs."""
+        rects = self._tab_rects()
+        if rects:
+            return int(rects[-1][1].right() + 8 + _CHEVRON_W + 8)
         metrics = QFontMetrics(self._title_font())
         return int(metrics.horizontalAdvance(self._title())
                    + 12 + 8 + _CHEVRON_W + 8)
+
+    def _body_aspect(self) -> float:
+        """Width-to-height ratio of the page in the body. The pad diagram has a
+        fixed one; the preview's follows the capture source."""
+        if self._tab == INPUT_TAB and self._guest is not None:
+            aspect = float(getattr(self._guest, "aspect", lambda: 16 / 9)())
+            if aspect > 0.01:
+                return aspect
+        return _BODY_ASPECT
 
     def _target_size(self) -> tuple[int, int]:
         """Size to lay out at: the requested width capped to what the host can
         hold. The request is kept intact, so growing the host restores it."""
         host = self.parentWidget()
+        aspect = self._body_aspect()
         max_w, max_h = 4096, 4096
         if host is not None and host.width() > 0:
             max_w = max(MIN_WIDTH, host.width() - 2 * _MARGIN)
@@ -151,14 +299,16 @@ class ControllerMapOverlay(QWidget):
         width = min(self._wanted, max_w)
         body_h = max_h - _HEADER_H
         if body_h > 0:
-            width = min(width, round(body_h * _BODY_ASPECT))
+            width = min(width, round(body_h * aspect))
         width = max(MIN_WIDTH, int(width))
-        return (width, _HEADER_H + max(1, round(width / _BODY_ASPECT)))
+        return (width, _HEADER_H + max(1, round(width / aspect)))
 
     def _refit(self, keep_pos: bool = False) -> None:
+        self._ensure_tab()
         width, height = self._target_size()
         if (width, height) != (self.width(), self.height()):
             self.setFixedSize(width, height)
+        self._layout_guest()
         if keep_pos:
             # A collapse or a grip drag anchors the top-left corner.
             self._move_within_host(self.x(), self.y())
@@ -209,14 +359,25 @@ class ControllerMapOverlay(QWidget):
             return QRect()  # nothing to resize while folded
         return QRect(self.width() - _GRIP, self.height() - _GRIP, _GRIP, _GRIP)
 
+    def _tab_at(self, pos) -> Optional[str]:
+        """Which tab, if any, is under `pos` — the inactive ones only, so a
+        press on the current tab falls through to the drag-move."""
+        for key, rect in self._tab_rects():
+            if key != self._tab and rect.contains(pos):
+                return key
+        return None
+
     # ---- mouse -----------------------------------------------------------
     def mousePressEvent(self, ev) -> None:
         if ev.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(ev)
             return
         pos = ev.position().toPoint()
+        hit_tab = self._tab_at(pos)
         if self._chevron_rect().contains(pos):
             self._press_chevron = True
+        elif hit_tab is not None:
+            self._select_tab(hit_tab)
         elif self._grip_rect().contains(pos):
             self._resize = (ev.globalPosition().toPoint(), self.width())
         else:
@@ -280,8 +441,10 @@ class ControllerMapOverlay(QWidget):
         super().mouseReleaseEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:
+        pos = ev.position().toPoint()
         if (ev.button() == Qt.MouseButton.LeftButton
-                and self._header_rect().contains(ev.position().toPoint())):
+                and self._header_rect().contains(pos)
+                and self._tab_at(pos) is None):
             self._move = None  # the first click of the pair started a move
             self.set_collapsed(not self._collapsed)
             ev.accept()
@@ -289,7 +452,7 @@ class ControllerMapOverlay(QWidget):
         super().mouseDoubleClickEvent(ev)
 
     def _update_cursor(self, pos) -> None:
-        if self._chevron_rect().contains(pos):
+        if self._chevron_rect().contains(pos) or self._tab_at(pos) is not None:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         elif self._grip_rect().contains(pos):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
@@ -308,8 +471,8 @@ class ControllerMapOverlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._paint_backdrop(p)
         self._paint_header(p)
-        if self._collapsed:
-            return
+        if self._collapsed or self._tab != PAD_TAB:
+            return   # the input page is a real widget, drawn over the backdrop
         p.save()
         p.translate(0.0, float(_HEADER_H))
         scale = self.width() / _BODY_W
@@ -329,15 +492,37 @@ class ControllerMapOverlay(QWidget):
     def _paint_header(self, p: QPainter) -> None:
         font = self._title_font()
         p.setFont(font)
-        p.setPen(QColor(_MUTED))
-        box = QRect(12, 0, max(0, self.width() - 12 - _CHEVRON_W - 14), _HEADER_H)
-        p.drawText(box, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   QFontMetrics(font).elidedText(
-                       self._title(), Qt.TextElideMode.ElideRight, box.width()))
+        rects = self._tab_rects()
+        if rects:
+            self._paint_tabs(p, rects)
+        else:
+            p.setPen(QColor(_MUTED))
+            box = QRect(12, 0, max(0, self.width() - 12 - _CHEVRON_W - 14),
+                        _HEADER_H)
+            p.drawText(box,
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       QFontMetrics(font).elidedText(
+                           self._title(), Qt.TextElideMode.ElideRight,
+                           box.width()))
         if not self._collapsed:
             p.setPen(QPen(QColor(_BORDER), 1.0))
             p.drawLine(1, _HEADER_H, self.width() - 2, _HEADER_H)
         self._paint_chevron(p)
+
+    def _paint_tabs(self, p: QPainter, rects: list) -> None:
+        """Two-page header: the active tab is a filled chip, the other plain
+        text. Same weight as the title it replaces — a tab strip here should
+        read as a label, not as a row of buttons."""
+        for key, rect in rects:
+            active = key == self._tab
+            if active:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(_TAB_FILL))
+                p.drawRoundedRect(QRectF(rect), 5, 5)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QColor(_TEXT if active else _MUTED))
+            label = _PAD_LABEL if key == PAD_TAB else _INPUT_LABEL
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_chevron(self, p: QPainter) -> None:
         """Points up while expanded (click folds it), down while collapsed."""

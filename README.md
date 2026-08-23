@@ -162,6 +162,9 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Auto Switch** — shows the detected monsters while in a fight; 1 minute after the last
     monster disappears it switches to your full Grimoire notes. The app opens on this view.
   - **Grimoire** — locks to the notes view; no auto-switching.
+- **View buttons** — **🎯 / 📖** flips the main pane between the tracking view and your Grimoire
+  notes, and **🌐** opens the browser drawer. The two sit side by side at the right of the navbar,
+  drawn larger than the rest of the bar: they are the ones you hit mid-fight.
 
 ## The ☰ menu
 
@@ -212,8 +215,10 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Grimoire user…** — the Grimoire account whose **focus README** supplies the drawer's
     bookmarks. New tabs list every link under that note's `# Bookmarks` heading; ★ re-syncs.
     Stored as `grimoire.user` in `config.yaml`.
-- **Window** — **Always on top** / **Fullscreen (F11)** / **Input preview** /
-  **Controller button map** / **Controller map ▸** (see below).
+- **Window** — **Always on top** / **Fullscreen (F11)**.
+- **Overlays** — the two things that float over the main pane: **Input preview** (the PiP),
+  **Controller button map**, **Combine into one panel** (see below) and **Pad layouts ▸** for
+  picking which two pads the map shows.
 - **Debug**
   - **Show OCR debug log** — show the in-app panel of raw/matched OCR text plus a manual
     *Test OCR* box for trying name matches.
@@ -227,8 +232,8 @@ to Xbox. The overlay shows two pads side by side — face buttons in their real 
 bumpers and triggers — so a glance tells you what the button under your thumb is called on the
 other pad. There are no mapping lines; the shared geometry does the work.
 
-**Turn it on** with the **🎮** navbar button or ☰ → *Window* → *Controller button map* (the two
-always agree). **Pick the pair** under ☰ → *Window* → *Controller map ▸ Left pad / Right pad*.
+**Turn it on** under ☰ → *Overlays* → *Controller button map*. **Pick the pair** under
+☰ → *Overlays* → *Pad layouts ▸ Left pad / Right pad*.
 
 Like the input preview, it **rides above whichever view is showing** — tracking or Grimoire. Only
 the review screen displaces it (that one owns the whole pane); it comes back on its own when you
@@ -242,12 +247,26 @@ close it.
 
 Position, size, collapsed state and the chosen pair are all saved to `config.yaml` under `ui:`.
 
+### One panel, or two
+
+☰ → *Overlays* → **Combine into one panel** folds the input preview into the same frame as the pad
+map: one panel with **Pad** and **Input** tabs, so you drag, resize and collapse them together
+instead of arranging two overlays. Click a tab to swap pages — the width you set is kept and the
+height follows the page (the pads have their own shape, the preview follows the capture ratio).
+Only the page you are looking at refreshes, so the preview costs nothing while the Pad tab is up.
+
+Turn it off and the preview goes straight back to its own corner at its own size — merging never
+overwrites either one's saved geometry. With the pad map switched off the panel is simply the
+preview's frame, and clicking the preview still opens the review screen.
+
+Stored as `ui.merge_overlays` (off by default) and `ui.overlay_tab`.
+
 ## Video review (rolling buffer)
 
 The app continuously keeps the **last 30 minutes** of the capture feed, so a fight is always
 replayable after the fact — nothing has to be armed beforehand.
 
-**Open it** by clicking the **input preview** (the PiP; enable it via ☰ → *Window* → *Input
+**Open it** by clicking the **input preview** (the PiP; enable it via ☰ → *Overlays* → *Input
 preview*), or with **Ctrl+R**. The review screen takes over the main pane; the live feed and OCR
 keep running behind it, and the buffer keeps recording while you watch.
 
@@ -506,13 +525,15 @@ ui:
   mute_hotkey: ctrl+shift+m        # system-wide mute/unmute for the narration
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
-  show_controller_map: false       # controller button map over the main pane (🎮)
+  show_controller_map: false       # controller button map over the main pane
   controller_map_left: playstation # playstation | switch | xbox | steamdeck
   controller_map_right: switch
   controller_map_width: 420        # overlay width in px; drag its corner grip
   controller_map_x: 0.5            # position as a 0–1 share of the free space,
   controller_map_y: 0.08           # so a resized window keeps it in proportion
   controller_map_collapsed: false  # folded down to the header pill
+  merge_overlays: false            # PiP and pad map share one tabbed panel
+  overlay_tab: pad                 # page shown while merged: pad | input
   dialogue_collapsed: false        # dialogue strip folded down to its header
   dialogue_test_box: true          # the type-a-line box inside the dialogue log
   dialogue_height: 132             # transcript height in px; drag its bottom grip

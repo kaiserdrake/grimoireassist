@@ -13,6 +13,11 @@ chosen width is reported via `size_changed` so the host can persist it.
 
 Clicking anywhere else on it emits `clicked`, which the host turns into the
 review screen for the rolling capture buffer.
+
+It can also be *docked*: handed to the overlay panel as a tab, where the panel
+owns the position, the width and the chrome, and this widget is only the
+picture. `set_docked()` is the whole switch — everything else behaves the same,
+including the click-to-review and the OCR boxes.
 """
 from __future__ import annotations
 
@@ -37,6 +42,8 @@ class InputPreview(QWidget):
 
     size_changed = pyqtSignal(int)  # new width, emitted when a drag-resize ends
     clicked = pyqtSignal()          # plain click on the image (not the grip)
+    aspect_changed = pyqtSignal(float)  # source ratio changed; a docking host
+                                        # has to re-fit around the new height
 
     def __init__(self, buffer: FrameBuffer, fps: float, parent: QWidget,
                  width: int = DEFAULT_WIDTH) -> None:
@@ -54,6 +61,8 @@ class InputPreview(QWidget):
         self._width = 0           # width actually laid out (may be host-capped)
         self._wanted = DEFAULT_WIDTH  # width the user asked for / config holds
         self._drag: Optional[tuple] = None  # (grab point, width at grab), while resizing
+        self._docked = False       # inside the overlay panel: it owns geometry
+        self._docked_width = 0     # width the panel imposes while docked
         self.setMouseTracking(True)         # so the grip can change the cursor
         self._apply_width(width)
         self._timer = QTimer(self)
@@ -87,6 +96,23 @@ class InputPreview(QWidget):
         self._bottom_inset = max(0, px)
         self._refit()  # the shorter host may cap the width
 
+    # ---- docking ---------------------------------------------------------
+    def set_docked(self, docked: bool, width: int = 0) -> None:
+        """Docked, the overlay panel places and sizes this widget and draws the
+        frame, so the corner anchoring and the resize grip step aside. Undocked
+        it goes back to the host's bottom-left corner at the user's own width,
+        which docking never overwrites."""
+        self._docked = bool(docked)
+        self._docked_width = max(0, int(width))
+        self._refit()
+
+    def is_docked(self) -> bool:
+        return self._docked
+
+    def aspect(self) -> float:
+        """Source frame ratio — the panel sizes its body from this."""
+        return self._aspect
+
     # ---- sizing ----------------------------------------------------------
     def _clamp_width(self, width: int) -> int:
         """Keep the preview at least MIN_WIDTH and small enough to fit the
@@ -108,7 +134,10 @@ class InputPreview(QWidget):
     def _refit(self) -> None:
         """Lay out at the requested width, capped to what the host can hold.
         The request is kept intact, so growing the host restores the full size."""
-        width = self._clamp_width(self._wanted)
+        if self._docked:
+            width = max(MIN_WIDTH, self._docked_width or self._width)
+        else:
+            width = self._clamp_width(self._wanted)
         height = max(1, round(width / self._aspect))
         if (width, height) != (self.width(), self.height()) or width != self._width:
             self._width = width
@@ -134,6 +163,7 @@ class InputPreview(QWidget):
         if abs(aspect - self._aspect) > 1e-3:
             self._aspect = aspect
             self._refit()  # height follows the new ratio
+            self.aspect_changed.emit(aspect)
         pw, ph = self.width(), self.height()
         # Downscale first so the RGB conversion and QImage copy work on
         # preview-sized data. INTER_LINEAR over INTER_AREA: ~13x faster and the
@@ -186,17 +216,35 @@ class InputPreview(QWidget):
         p.drawText(band, Qt.AlignmentFlag.AlignCenter, self._hint)
 
     def _paint_grip(self, p: QPainter) -> None:
-        """Three short diagonals in the top-right corner: the resize handle."""
+        """Three short diagonals in the resize corner: top-right on its own
+        (the bottom-left is anchored), bottom-right while docked, where the
+        panel's grip lives underneath this widget."""
         p.setPen(QPen(QColor(255, 255, 255, 110 if self._drag else 70), 1))
         right = self.width() - 1
+        if self._docked:
+            bottom = self.height() - 3
+            for off in (4, 8, 12):
+                p.drawLine(right - 2 - off, bottom, right - 2, bottom - off)
+            return
         for off in (5, 9, 13):
             p.drawLine(right - 2, off, right - off, 2)
 
     # ---- resizing ----------------------------------------------------------
     def _in_grip(self, pos) -> bool:
+        if self._docked:
+            return False   # the panel's grip does the resizing while docked
         return pos.x() >= self.width() - _GRIP and pos.y() <= _GRIP
 
+    def _in_dock_grip(self, pos) -> bool:
+        """The panel's resize corner, which this widget covers while docked.
+        Presses there are left unaccepted so Qt hands them to the panel."""
+        return (self._docked and pos.x() >= self.width() - _GRIP
+                and pos.y() >= self.height() - _GRIP)
+
     def mousePressEvent(self, ev) -> None:
+        if self._in_dock_grip(ev.position()):
+            super().mousePressEvent(ev)   # ignored → propagates to the panel
+            return
         if ev.button() == Qt.MouseButton.LeftButton and self._in_grip(ev.position()):
             self._drag = (ev.globalPosition().toPoint(), self._width)
             ev.accept()
@@ -209,7 +257,9 @@ class InputPreview(QWidget):
 
     def mouseMoveEvent(self, ev) -> None:
         if self._drag is None:
-            if self._in_grip(ev.position()):
+            if self._in_dock_grip(ev.position()):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif self._in_grip(ev.position()):
                 self.setCursor(Qt.CursorShape.SizeBDiagCursor)
             elif self._hint:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -264,8 +314,8 @@ class InputPreview(QWidget):
 
     def _reposition(self) -> None:
         host = self.parentWidget()
-        if host is None:
-            return
+        if host is None or self._docked:
+            return   # docked: the panel moves us
         self.move(_MARGIN,
                   host.height() - self.height() - _MARGIN - self._bottom_inset)
         self.raise_()

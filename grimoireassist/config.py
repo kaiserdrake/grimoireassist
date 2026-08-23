@@ -41,6 +41,12 @@ def _pad_id(value, fallback: str) -> str:
     return valid_id(value, fallback)
 
 
+def _overlay_tab(value) -> str:
+    """Which page the merged overlay panel opens on."""
+    key = str(value or "").strip().lower()
+    return key if key in ("pad", "input") else "pad"
+
+
 @dataclass
 class Region:
     x: int = 0
@@ -136,6 +142,8 @@ class UiConfig:
     controller_map_x: float = 0.5       # position as a 0..1 share of the free space,
     controller_map_y: float = 0.08      # so a resized window keeps it in proportion
     controller_map_collapsed: bool = False  # folded down to the header pill
+    merge_overlays: bool = False        # PiP and pad map share one tabbed panel
+    overlay_tab: str = "pad"            # tab shown while merged: "pad" or "input"
     dialogue_collapsed: bool = False    # dialogue strip folded down to its header
     dialogue_test_box: bool = True      # the type-a-line box inside the dialogue log
     dialogue_height: int = 132          # transcript height in px; drag its bottom grip
@@ -413,6 +421,8 @@ class Config:
                 controller_map_y=_clamp01(ui.get("controller_map_y", 0.08)),
                 controller_map_collapsed=bool(
                     ui.get("controller_map_collapsed", False)),
+                merge_overlays=bool(ui.get("merge_overlays", False)),
+                overlay_tab=_overlay_tab(ui.get("overlay_tab")),
                 dialogue_collapsed=bool(ui.get("dialogue_collapsed", False)),
                 dialogue_test_box=bool(ui.get("dialogue_test_box", True)),
                 dialogue_height=max(1, int(ui.get("dialogue_height", 132))),
@@ -525,6 +535,8 @@ class Config:
                 "controller_map_x": self.ui.controller_map_x,
                 "controller_map_y": self.ui.controller_map_y,
                 "controller_map_collapsed": self.ui.controller_map_collapsed,
+                "merge_overlays": self.ui.merge_overlays,
+                "overlay_tab": self.ui.overlay_tab,
                 "dialogue_collapsed": self.ui.dialogue_collapsed,
                 "dialogue_test_box": self.ui.dialogue_test_box,
                 "dialogue_height": self.ui.dialogue_height,

@@ -44,7 +44,8 @@ from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
 from .controller_overlay import ControllerMapOverlay
 from .controllers import LAYOUTS, LAYOUT_ORDER
-from .monster_panel import MonsterNav, MonsterPanel, AutoSwitchToggle
+from .monster_panel import MonsterNav, MonsterPanel
+from .slide_toggle import AutoSwitchToggle
 from .preview import InputPreview
 from .review import ReviewOverlay
 
@@ -63,6 +64,12 @@ _DIALOGUE_STAMP = "#7f7f93"      # timestamp: present but never competing with t
 _DIALOGUE_HEADER = "#e0a94f"     # box header / speaker label: shown, never spoken
 _DIALOGUE_SELECTED = "#33335a"   # the picked line, for replaying it
 _DIALOGUE_MAX_LINES = 200
+
+
+# The Grimoire and Browser toolbar buttons: emoji glyphs, deliberately larger
+# than the rest of the bar. They are the two most-used controls and are hit
+# mid-battle, so they get the biggest targets.
+_VIEW_BTN_CSS = "QToolButton { font-size:22px; padding:1px 12px; }"
 
 
 _DIALOGUE_MIN_H = 56       # below this the transcript shows less than two lines
@@ -228,7 +235,15 @@ class MainWindow(QMainWindow):
         self._main_ratio = min(max(cfg.ui.browser_split_ratio, 0.1), 0.9)
         self._splitter.setStyleSheet(
             "QSplitter::handle { background:#2a2a36; }")
-        self.setCentralWidget(self._splitter)
+        # The splitter sits inside a plain container so window-wide floating
+        # children (the controller map) have somewhere to live: a widget
+        # re-parented onto a QSplitter would be swallowed as a third pane.
+        self._center = QWidget()
+        _center_lay = QVBoxLayout(self._center)
+        _center_lay.setContentsMargins(0, 0, 0, 0)
+        _center_lay.setSpacing(0)
+        _center_lay.addWidget(self._splitter)
+        self.setCentralWidget(self._center)
 
         # Live input-frame PiP: floats over the main pane's bottom-left corner,
         # outside the layout. Its refresh timer only runs while it is visible.
@@ -245,8 +260,11 @@ class MainWindow(QMainWindow):
         # Controller button reference: two pads side by side, floating over
         # whichever view is showing. Drag to move, grip to resize, chevron to
         # collapse; all three are persisted to config.
+        # It hangs off the whole central area, not the main pane, so opening
+        # the browser drawer doesn't shove it into the left half — its position
+        # is relative to the window and stays put as the splitter moves.
         self._ctrl_map = ControllerMapOverlay(
-            parent=self._main_host,
+            parent=self._center,
             left_id=cfg.ui.controller_map_left,
             right_id=cfg.ui.controller_map_right,
             width=cfg.ui.controller_map_width,
@@ -254,10 +272,11 @@ class MainWindow(QMainWindow):
             collapsed=cfg.ui.controller_map_collapsed)
         self._ctrl_map.geometry_changed.connect(self._on_ctrl_map_geometry)
         self._ctrl_map.collapsed_changed.connect(self._on_ctrl_map_collapsed)
+        self._ctrl_map.tab_changed.connect(self._on_overlay_tab)
         self._ctrl_map.setVisible(False)
         # Reflect the stored state in the menu item and toolbar button; the
         # _set_grimoire(False) at the end of __init__ turns it visible.
-        self._sync_controller_map_buttons()
+        self._sync_controller_map_action()
 
         # Dialogue narration. The speaker owns a thread and (for the offline
         # voice) a COM object, so it is only built once the feature is switched
@@ -413,6 +432,10 @@ class MainWindow(QMainWindow):
             main_w = round(total * self._main_ratio)
             self._splitter.setSizes([main_w, total - main_w])
             self.browser.focus_url_bar()
+            # The controller map floats over the whole central area, drawer
+            # included, so keep it on top of the newly shown web view.
+            if getattr(self, "_ctrl_map", None) is not None:
+                self._ctrl_map.raise_()
             # Bookmarks track the Grimoire focus game, so re-read them whenever
             # the drawer comes back into view (throttled inside the panel).
             self.browser.sync_bookmarks(force=False)
@@ -586,8 +609,7 @@ class MainWindow(QMainWindow):
         self._review = ReviewOverlay(snap, self._data_dir() / "recordings",
                                      parent=self._main_host)
         self._review.closed.connect(self._on_review_closed)
-        self._preview.setVisible(False)   # its refresh timer stops with it
-        self._sync_controller_map()       # the review screen owns the pane
+        self._sync_overlays()   # the review screen owns the pane: both hide
         self._review.show()
         self._review.raise_()
 
@@ -595,10 +617,7 @@ class MainWindow(QMainWindow):
         review, self._review = self._review, None
         if review is not None:
             review.deleteLater()
-        self._preview.setVisible(self.act_preview.isChecked())
-        if self._preview.isVisible():
-            self._preview.raise_()
-        self._sync_controller_map()
+        self._sync_overlays()
 
     def _open_recordings_folder(self) -> None:
         import subprocess
@@ -688,32 +707,32 @@ class MainWindow(QMainWindow):
         self.menu = QMenu(self)
 
         # ── Camera ──────────────────────────────────────────────
-        self.menu.addSection("Camera")
-        self.camera_menu = self.menu.addMenu("Select source…")
-        self.menu.addAction("Retry camera", self._retry_camera)
-        self.menu.addAction("Calibrate regions…\tF9", self._open_calibration)
+        menu_camera = self.menu.addMenu("📷  Camera")
+        self.camera_menu = menu_camera.addMenu("Select source…")
+        menu_camera.addAction("Retry camera", self._retry_camera)
+        menu_camera.addAction("Calibrate regions…\tF9", self._open_calibration)
         _snap_label = self.cfg.ui.snapshot_hotkey.replace(" ", "").title()
-        self.menu.addAction(f"Snapshot frame\t{_snap_label}", self._save_snapshot)
+        menu_camera.addAction(f"Snapshot frame\t{_snap_label}", self._save_snapshot)
 
         # ── Review ──────────────────────────────────────────────
-        self.menu.addSection("Review")
-        self.act_open_review = self.menu.addAction(
+        menu_review = self.menu.addMenu("⏪  Review")
+        self.act_open_review = menu_review.addAction(
             "Review capture…\tCtrl+R", self._open_review)
         self.act_open_review.setToolTip(
             "Play back the rolling capture buffer (or click the input preview)")
-        self.act_review_buffer = self.menu.addAction("Keep rolling capture buffer")
+        self.act_review_buffer = menu_review.addAction("Keep rolling capture buffer")
         self.act_review_buffer.setCheckable(True)
         self.act_review_buffer.setChecked(self.cfg.review.enabled)
         self.act_review_buffer.toggled.connect(self._toggle_review_buffer)
-        self.menu.addAction("Open saved clips folder", self._open_recordings_folder)
+        menu_review.addAction("Open saved clips folder", self._open_recordings_folder)
 
         # ── OCR ─────────────────────────────────────────────────
-        self.menu.addSection("OCR")
-        self.act_gpu = self.menu.addAction("Use GPU")
+        menu_ocr = self.menu.addMenu("🔍  OCR")
+        self.act_gpu = menu_ocr.addAction("Use GPU")
         self.act_gpu.setCheckable(True)
         self.act_gpu.setChecked(self.cfg.ocr.gpu_effective())
         self.act_gpu.toggled.connect(self._toggle_gpu)
-        conf_menu = self.menu.addMenu("Track confidence")
+        conf_menu = menu_ocr.addMenu("Track confidence")
         conf_group = QActionGroup(conf_menu)
         conf_group.setExclusive(True)
         for level, label in (("low", "Low and up (all)"), ("mid", "Mid and up"),
@@ -724,36 +743,36 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, lv=level: self._set_min_confidence(lv))
             conf_group.addAction(act)
             conf_menu.addAction(act)
-        self.act_auto_track = self.menu.addAction("Auto-start tracking on launch")
+        self.act_auto_track = menu_ocr.addAction("Auto-start tracking on launch")
         self.act_auto_track.setCheckable(True)
         self.act_auto_track.setChecked(self.cfg.ui.auto_start_tracking)
         self.act_auto_track.toggled.connect(self._toggle_auto_start_tracking)
 
         # ── Speech ───────────────────────────────────────────────
-        self.menu.addSection("Speech")
-        self.act_speech = self.menu.addAction("Speak dialogue")
+        menu_speech = self.menu.addMenu("🔊  Speech")
+        self.act_speech = menu_speech.addAction("Speak dialogue")
         self.act_speech.setCheckable(True)
         self.act_speech.setChecked(self.cfg.speech.enabled)
         self.act_speech.setToolTip(
             "Read the dialogue region aloud (set the region with Calibrate regions)")
         self.act_speech.toggled.connect(self._toggle_speech)
         _mute_label = self.cfg.ui.mute_hotkey.replace(" ", "").title()
-        self.act_mute = self.menu.addAction(f"Mute narration	{_mute_label}")
+        self.act_mute = menu_speech.addAction(f"Mute narration	{_mute_label}")
         self.act_mute.setCheckable(True)
         self.act_mute.setChecked(self.cfg.speech.muted)
         self.act_mute.setToolTip("Silence the voice; keep detecting and logging")
         self.act_mute.toggled.connect(self._set_muted)
-        self.act_dialogue_log = self.menu.addAction("Show dialogue log")
+        self.act_dialogue_log = menu_speech.addAction("Show dialogue log")
         self.act_dialogue_log.setCheckable(True)
         self.act_dialogue_log.setChecked(False)
         self.act_dialogue_log.toggled.connect(self._toggle_dialogue_panel)
-        self.act_test_box = self.menu.addAction("Show test line box")
+        self.act_test_box = menu_speech.addAction("Show test line box")
         self.act_test_box.setCheckable(True)
         self.act_test_box.setChecked(self.cfg.ui.dialogue_test_box)
         self.act_test_box.setToolTip(
             "The type-a-line box inside the dialogue log")
         self.act_test_box.toggled.connect(self._toggle_dialogue_test_box)
-        backend_menu = self.menu.addMenu("Voice source")
+        backend_menu = menu_speech.addMenu("Voice source")
         backend_group = QActionGroup(backend_menu)
         backend_group.setExclusive(True)
         _online_ok = EdgeNeuralBackend.available()
@@ -770,9 +789,9 @@ class MainWindow(QMainWindow):
             backend_group.addAction(act)
             backend_menu.addAction(act)
         # Populated on open: listing the online voices is a network call.
-        self.voice_menu = self.menu.addMenu("Voice")
+        self.voice_menu = menu_speech.addMenu("Voice")
         self.voice_menu.aboutToShow.connect(self._populate_voice_menu)
-        rate_menu = self.menu.addMenu("Voice speed")
+        rate_menu = menu_speech.addMenu("Voice speed")
         rate_group = QActionGroup(rate_menu)
         rate_group.setExclusive(True)
         # Narration competes with the game for your attention, so the useful
@@ -785,17 +804,17 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, v=value: self._set_speech_rate(v))
             rate_group.addAction(act)
             rate_menu.addAction(act)
-        self.menu.addAction("Test voice", self._test_voice)
+        menu_speech.addAction("Test voice", self._test_voice)
 
         # ── Game ─────────────────────────────────────────────────
-        self.menu.addSection("Game")
-        self.menu.addAction("Add game…", self._add_game)
-        self.menu.addAction("Switch game…", self._switch_game)
-        self.menu.addAction("Import monster data…", self._open_import_wizard)
+        menu_game = self.menu.addMenu("🎲  Game")
+        menu_game.addAction("Add game…", self._add_game)
+        menu_game.addAction("Switch game…", self._switch_game)
+        menu_game.addAction("Import monster data…", self._open_import_wizard)
 
         # ── Browser ──────────────────────────────────────────────
-        self.menu.addSection("Browser")
-        engine_menu = self.menu.addMenu("Search engine")
+        menu_browser = self.menu.addMenu("🌐  Browser")
+        engine_menu = menu_browser.addMenu("Search engine")
         engine_group = QActionGroup(engine_menu)
         engine_group.setExclusive(True)
         current_engine = getattr(self.cfg.ui, "search_engine", "google")
@@ -806,30 +825,43 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _c, k=key: self.browser.set_search_engine(k))
             engine_group.addAction(act)
             engine_menu.addAction(act)
-        self.menu.addAction("Grimoire user…", self._set_grimoire_user)
+        menu_browser.addAction("Grimoire user…", self._set_grimoire_user)
 
         # ── Window ───────────────────────────────────────────────
-        self.menu.addSection("Window")
-        self.act_on_top = self.menu.addAction("Always on top")
+        menu_window = self.menu.addMenu("🪟  Window")
+        self.act_on_top = menu_window.addAction("Always on top")
         self.act_on_top.setCheckable(True)
         self.act_on_top.setChecked(self.cfg.ui.always_on_top)
         self.act_on_top.toggled.connect(self._toggle_on_top)
-        self.act_fullscreen = self.menu.addAction("Fullscreen\tF11")
+        self.act_fullscreen = menu_window.addAction("Fullscreen\tF11")
         self.act_fullscreen.setCheckable(True)
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
+
+        # ── Overlays ─────────────────────────────────────────────
+        # The two things that float over the main pane, and whether they do it
+        # as one panel or two.
+        menu_overlays = self.menu.addMenu("🖼  Overlays")
         # Starts unchecked because the preview widget doesn't exist yet when the
         # menu is built; __init__ re-checks it from config after creating it.
-        self.act_preview = self.menu.addAction("Input preview")
+        self.act_preview = menu_overlays.addAction("Input preview")
         self.act_preview.setCheckable(True)
         self.act_preview.setChecked(False)
         self.act_preview.toggled.connect(self._toggle_preview)
         # Same story: the overlay doesn't exist yet, so __init__ re-checks this
         # from config once it does.
-        self.act_ctrl_map = self.menu.addAction("Controller button map")
+        self.act_ctrl_map = menu_overlays.addAction("Controller button map")
         self.act_ctrl_map.setCheckable(True)
         self.act_ctrl_map.setChecked(False)
         self.act_ctrl_map.toggled.connect(self._set_controller_map_enabled)
-        pads_menu = self.menu.addMenu("Controller map")
+        self.act_merge_overlays = menu_overlays.addAction(
+            "Combine into one panel")
+        self.act_merge_overlays.setCheckable(True)
+        self.act_merge_overlays.setChecked(self.cfg.ui.merge_overlays)
+        self.act_merge_overlays.setToolTip(
+            "One movable panel with Pad and Input tabs, instead of two overlays")
+        self.act_merge_overlays.toggled.connect(self._set_overlays_merged)
+        menu_overlays.addSeparator()
+        pads_menu = menu_overlays.addMenu("Pad layouts")
         for side, current in (("left", self.cfg.ui.controller_map_left),
                               ("right", self.cfg.ui.controller_map_right)):
             side_menu = pads_menu.addMenu(f"{side.capitalize()} pad")
@@ -845,12 +877,12 @@ class MainWindow(QMainWindow):
                 side_menu.addAction(act)
 
         # ── Debug ────────────────────────────────────────────────
-        self.menu.addSection("Debug")
-        self.act_debug = self.menu.addAction("Show OCR debug log")
+        menu_debug = self.menu.addMenu("🐞  Debug")
+        self.act_debug = menu_debug.addAction("Show OCR debug log")
         self.act_debug.setCheckable(True)
         self.act_debug.setChecked(False)
         self.act_debug.toggled.connect(self._toggle_debug)
-        self.act_log_file = self.menu.addAction("Log to file")
+        self.act_log_file = menu_debug.addAction("Log to file")
         self.act_log_file.setCheckable(True)
         self.act_log_file.setChecked(self.cfg.logging.to_file)
         self.act_log_file.toggled.connect(self._toggle_file_logging)
@@ -888,37 +920,27 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.auto_switch_toggle)
         tb.addSeparator()
 
+        # The two view buttons sit together, with no separator between them:
+        # both answer "what is in the main area", so they read as one pair.
         # Manual Grimoire view toggle — independent of Auto Switch; showing the
         # Grimoire never changes the Auto Switch state.
         self.grimoire_btn = QToolButton()
         self.grimoire_btn.setCheckable(True)
-        self.grimoire_btn.setStyleSheet(
-            "QToolButton { font-size:15px; padding:2px 8px; }")
+        self.grimoire_btn.setStyleSheet(_VIEW_BTN_CSS)
         self.grimoire_btn.clicked.connect(self._toggle_grimoire_view)
         self._update_grimoire_btn()
         tb.addWidget(self.grimoire_btn)
-        tb.addSeparator()
-
-        # Controller button map toggle — mirrors act_ctrl_map in the menu.
-        self.ctrl_map_btn = QToolButton()
-        self.ctrl_map_btn.setText("🎮")
-        self.ctrl_map_btn.setCheckable(True)
-        self.ctrl_map_btn.setToolTip("Toggle the controller button map")
-        self.ctrl_map_btn.setStyleSheet(
-            "QToolButton { font-size:15px; padding:2px 8px; }")
-        self.ctrl_map_btn.clicked.connect(self._set_controller_map_enabled)
-        tb.addWidget(self.ctrl_map_btn)
-        tb.addSeparator()
 
         # Browser drawer toggle.
         self.browser_btn = QToolButton()
         self.browser_btn.setText("🌐")
         self.browser_btn.setCheckable(True)
         self.browser_btn.setToolTip("Toggle browser (Ctrl+B)")
-        self.browser_btn.setStyleSheet(
-            "QToolButton { font-size:15px; padding:2px 8px; }")
+        self.browser_btn.setStyleSheet(_VIEW_BTN_CSS)
         self.browser_btn.clicked.connect(self._toggle_browser)
         tb.addWidget(self.browser_btn)
+        # The controller map has no toolbar control of its own: it is a
+        # set-and-forget overlay, and it lives under Overlays in the menu.
 
     def _start_warmup(self) -> None:
         """Pre-load the OCR model in the background. Start is always enabled
@@ -1345,11 +1367,9 @@ class MainWindow(QMainWindow):
         self._sync_preview_inset()
 
     def _toggle_preview(self, visible: bool) -> None:
-        self._preview.setVisible(visible)
-        if visible:
-            self._preview.raise_()
-        self.cfg.ui.show_input_preview = visible
+        self.cfg.ui.show_input_preview = bool(visible)
         self.cfg.save()
+        self._sync_overlays()
 
     def _on_preview_resized(self, width: int) -> None:
         """Persist a drag-resize of the PiP (emitted once, on mouse release)."""
@@ -1357,31 +1377,67 @@ class MainWindow(QMainWindow):
         self.cfg.save()
 
     # ================= controller button map =================
-    def _sync_controller_map_buttons(self) -> None:
-        """Point the menu item and the toolbar button at the stored state
-        without re-entering their own toggled/clicked slots."""
-        for widget in (self.act_ctrl_map, self.ctrl_map_btn):
-            widget.blockSignals(True)
-            widget.setChecked(self.cfg.ui.show_controller_map)
-            widget.blockSignals(False)
+    def _sync_controller_map_action(self) -> None:
+        """Point the menu item at the stored state without re-entering its own
+        toggled slot (__init__ sets it once the overlay exists)."""
+        self.act_ctrl_map.blockSignals(True)
+        self.act_ctrl_map.setChecked(self.cfg.ui.show_controller_map)
+        self.act_ctrl_map.blockSignals(False)
 
-    def _sync_controller_map(self) -> None:
-        """Like the PiP, the overlay rides above whichever view is showing —
-        tracking or Grimoire. Only the review screen displaces it, because that
-        one owns the whole pane. Still called on every view change so the
-        overlay is re-raised over the newly shown page."""
-        show = (self.cfg.ui.show_controller_map
-                and getattr(self, "_review", None) is None)
-        self._ctrl_map.setVisible(show)
-        if show:
+    def _sync_overlays(self) -> None:
+        """The single authority over the two floating overlays: whether they
+        share one panel, which of them is on, and who is on top.
+
+        Both ride above whichever view is showing — tracking or Grimoire — so
+        this runs on every view change too, to re-raise them over the newly
+        shown page. Only the review screen displaces them, because that one
+        owns the whole pane. Called from the menu, the toolbar and __init__, so
+        it has to tolerate running before the widgets exist."""
+        if getattr(self, "_ctrl_map", None) is None:
+            return
+        pip_on = self.cfg.ui.show_input_preview
+        pad_on = self.cfg.ui.show_controller_map
+        reviewing = getattr(self, "_review", None) is not None
+
+        # Merged: the preview becomes the panel's second tab. It stays docked
+        # while the review screen is up — hiding the panel takes it along.
+        if self.cfg.ui.merge_overlays and pip_on:
+            if not self._ctrl_map.has_guest():
+                self._ctrl_map.attach_guest(self._preview)
+                self._ctrl_map.set_active_tab(self.cfg.ui.overlay_tab)
+        elif self._ctrl_map.has_guest():
+            self._ctrl_map.detach_guest(self._main_host)
+        docked = self._ctrl_map.has_guest()
+        self._ctrl_map.set_pad_enabled(pad_on)
+
+        # The panel earns its place if either of its pages has something to show.
+        show_panel = (pad_on or docked) and not reviewing
+        self._ctrl_map.setVisible(show_panel)
+        if show_panel:
             self._ctrl_map.raise_()
+        if not docked:
+            show_pip = pip_on and not reviewing
+            self._preview.setVisible(show_pip)
+            if show_pip:
+                self._preview.raise_()
+
+    def _set_overlays_merged(self, merged: bool) -> None:
+        """Menu switch: one tabbed panel, or two separate overlays."""
+        self.cfg.ui.merge_overlays = bool(merged)
+        self.cfg.save()
+        self._sync_overlays()
+
+    def _on_overlay_tab(self, key: str) -> None:
+        """Remember which page of the merged panel was last up."""
+        self.cfg.ui.overlay_tab = str(key)
+        self.cfg.save()
 
     def _set_controller_map_enabled(self, on: bool) -> None:
-        """Single entry point for the two toggles, so they can't drift apart."""
+        """Single entry point for the overlay's on/off state."""
         self.cfg.ui.show_controller_map = bool(on)
         self.cfg.save()
-        self._sync_controller_map_buttons()
-        self._sync_controller_map()
+        self._sync_controller_map_action()
+        self._sync_overlays()
 
     def _set_grimoire_user(self) -> None:
         """Ask for the Grimoire account whose focus README holds the bookmarks."""
@@ -2006,7 +2062,7 @@ class MainWindow(QMainWindow):
             self.panel.set_grimoire_visible(visible)
         self._apply_dialogue_visibility()
         self._update_grimoire_btn()
-        self._sync_controller_map()
+        self._sync_overlays()
 
     def _update_grimoire_btn(self) -> None:
         """Reflect the current view in the manual view button: the icon shows
