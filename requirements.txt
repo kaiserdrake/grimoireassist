@@ -2,8 +2,10 @@
 # The full opencv-python bundles Qt plugins that clash with PyQt6 (crash on startup).
 opencv-python-headless==4.11.0.86
 pyvirtualcam==0.12.0
-PyQt6==6.7.1
-PyQt6-WebEngine==6.7.0  # embeds the monster info site page
+PyQt6==6.11.0
+PyQt6-WebEngine==6.11.0  # embeds the monster info site page; bundled Chromium
+                         # is what Google's bot-detection fingerprints — keep
+                         # this current to avoid the "unusual traffic" wall
 easyocr==1.7.2
 PyYAML==6.0.2
 numpy>=1.26  # numpy 2.x works with the CUDA torch build; see README GPU section

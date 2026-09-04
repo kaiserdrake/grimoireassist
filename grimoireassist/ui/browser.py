@@ -55,7 +55,11 @@ _SYNC_MIN_INTERVAL_S = 2.0
 # Default search engines. Each template takes the URL-encoded query.
 SEARCH_ENGINES: dict[str, Tuple[str, str]] = {
     # key: (display name, query-URL template)
-    "google": ("Google", "https://www.google.com/search?q={}"),
+    # igu=1 ("in-app browser") tells Google to serve the stripped-down results
+    # page used by embedded/WebView browsers, skipping the "this browser may
+    # not be secure" interstitial that otherwise captcha-walls every query
+    # from QtWebEngine.
+    "google": ("Google", "https://www.google.com/search?q={}&igu=1"),
     "bing": ("Bing", "https://www.bing.com/search?q={}"),
     "duckduckgo": ("DuckDuckGo", "https://duckduckgo.com/?q={}"),
 }

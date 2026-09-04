@@ -2,7 +2,7 @@
 from pathlib import Path
 import sys
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 
 def app_root() -> Path:
