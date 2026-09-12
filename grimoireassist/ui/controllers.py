@@ -56,10 +56,10 @@ class ControllerLayout:
 LAYOUTS: dict[str, ControllerLayout] = {
     "playstation": ControllerLayout(
         id="playstation", name="PlayStation", short="PS",
-        top=Button("△", text="#4bbf9a"),
-        right=Button("○", text="#e05b5b"),
-        bottom=Button("✕", text="#6b8fe0"),
-        left=Button("□", text="#d96bb0"),
+        top=Button("△", text="#5cd6a0"),
+        right=Button("○", text="#ef8a76"),
+        bottom=Button("✕", text="#5b8fe8"),
+        left=Button("□", text="#e06bb8"),
         lb=Button("L1"), rb=Button("R1"), lt=Button("L2"), rt=Button("R2"),
     ),
     "switch": ControllerLayout(
@@ -69,10 +69,10 @@ LAYOUTS: dict[str, ControllerLayout] = {
     ),
     "xbox": ControllerLayout(
         id="xbox", name="Xbox", short="Xbox",
-        top=Button("Y", text="#e8c14a"),
-        right=Button("B", text="#e05b5b"),
-        bottom=Button("A", text="#6cc24a"),
-        left=Button("X", text="#4a90d9"),
+        top=Button("Y", text="#f2d24a"),
+        right=Button("B", text="#ef6f6f"),
+        bottom=Button("A", text="#5ed684"),
+        left=Button("X", text="#5aa8ef"),
         lb=Button("LB"), rb=Button("RB"), lt=Button("LT"), rt=Button("RT"),
     ),
     "steamdeck": ControllerLayout(

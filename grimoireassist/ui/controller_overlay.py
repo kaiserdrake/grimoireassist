@@ -28,7 +28,8 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen,
+                         QPolygonF)
 from PyQt6.QtWidgets import QWidget
 
 from .controllers import (DEFAULT_LEFT, DEFAULT_RIGHT, ControllerLayout,
@@ -46,17 +47,24 @@ _TITLE_PT = 8.0
 
 # The pads below it are drawn in this design space and scaled by width/_BODY_W,
 # so the width is the only degree of freedom — same contract as the PiP.
-_BODY_W = 480.0
-_BODY_H = 220.0
+# Shoulder pills and face buttons are sized as a generous fraction of the body
+# (not just scaled up together) so both read clearly even with the overlay
+# shrunk down — that's the whole point of the bigger constants below.
+_BODY_W = 600.0
+_BODY_H = 180.0
 _BODY_ASPECT = _BODY_W / _BODY_H
 
 _HALF_W = _BODY_W / 2      # one pad's column
-_PILL_W, _PILL_H = 34.0, 22.0
+_PILL_W, _PILL_H = 54.0, 34.0
 _PILL_INSET = 14.0
-_TRIGGER_Y, _BUMPER_Y = 12.0, 40.0
-_FACE_R = 23.0             # face-button radius
-_DIAMOND_CY = 142.0        # diamond centre within the body
-_DIAMOND_OFF = 46.0        # centre-to-centre distance out to each button
+_TRIGGER_Y, _BUMPER_Y = 10.0, 52.0
+_FACE_R = 26.0             # face-button radius
+# The diamond sits in the column's centre, the pills hug its left/right edges
+# (see _paint_pad), so the two never share x-range — the diamond can rise to
+# start level with the trigger row instead of sitting in the dead space below
+# the shoulder buttons.
+_DIAMOND_CY = 90.0         # diamond centre within the body
+_DIAMOND_OFF = 50.0        # centre-to-centre distance out to each button
 
 _GRIP = 16                 # bottom-right resize handle, in real px
 
@@ -75,6 +83,57 @@ _BORDER_HI = "#6a6a80"
 _MUTED = "#8a8a99"
 _TEXT = "#c8c8d2"
 _TAB_FILL = QColor(255, 255, 255, 26)   # chip behind the active tab
+
+# PlayStation's face labels (△○✕□) are drawn as vector shapes, not text: the
+# glyphs for those four characters carry wildly different stroke weights from
+# font to font — □ in particular renders noticeably thinner than the others —
+# so a shared pen width is the only way to keep all four looking like one set.
+_SHAPE_STROKE = 0.16   # pen width as a fraction of the face radius
+
+
+def _shape_pen(color: str, radius: float) -> QPen:
+    pen = QPen(QColor(color), radius * _SHAPE_STROKE)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return pen
+
+
+def _draw_triangle(p: QPainter, cx: float, cy: float, r: float, color: str) -> None:
+    p.setPen(_shape_pen(color, r))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    s = r * 0.52
+    p.drawPolygon(QPolygonF([QPointF(cx, cy - s),
+                             QPointF(cx + s * 0.92, cy + s * 0.68),
+                             QPointF(cx - s * 0.92, cy + s * 0.68)]))
+
+
+def _draw_circle(p: QPainter, cx: float, cy: float, r: float, color: str) -> None:
+    p.setPen(_shape_pen(color, r))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    s = r * 0.44
+    p.drawEllipse(QRectF(cx - s, cy - s, s * 2, s * 2))
+
+
+def _draw_cross(p: QPainter, cx: float, cy: float, r: float, color: str) -> None:
+    p.setPen(_shape_pen(color, r))
+    s = r * 0.40
+    p.drawLine(QPointF(cx - s, cy - s), QPointF(cx + s, cy + s))
+    p.drawLine(QPointF(cx - s, cy + s), QPointF(cx + s, cy - s))
+
+
+def _draw_square(p: QPainter, cx: float, cy: float, r: float, color: str) -> None:
+    p.setPen(_shape_pen(color, r))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    s = r * 0.38
+    p.drawRect(QRectF(cx - s, cy - s, s * 2, s * 2))
+
+
+_SHAPE_GLYPHS = {
+    "△": _draw_triangle,
+    "○": _draw_circle,
+    "✕": _draw_cross,
+    "□": _draw_square,
+}
 
 
 def _clamp01(value: float) -> float:
@@ -555,9 +614,10 @@ class ControllerMapOverlay(QWidget):
     def _paint_pill(self, p: QPainter, btn, rect: QRectF) -> None:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(btn.fill))
-        p.drawRoundedRect(rect, 5, 5)
+        p.drawRoundedRect(rect, 7, 7)
         font = QFont(self.font())
-        font.setPointSizeF(9.0)
+        font.setPointSizeF(13.5)
+        font.setBold(True)
         p.setFont(font)
         p.setPen(QColor(btn.text))
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, btn.label)
@@ -567,8 +627,13 @@ class ControllerMapOverlay(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(btn.fill))
         p.drawEllipse(rect)
+        shape = _SHAPE_GLYPHS.get(btn.label)
+        if shape is not None:
+            shape(p, cx, cy, _FACE_R, btn.text)
+            return
         font = QFont(self.font())
-        font.setPointSizeF(14.0)
+        font.setPointSizeF(17.0)
+        font.setBold(True)
         p.setFont(font)
         p.setPen(QColor(btn.text))
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, btn.label)
