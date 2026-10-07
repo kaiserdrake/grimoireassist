@@ -41,8 +41,35 @@ except Exception:  # pragma: no cover - WebEngine missing
 
 GRIMOIRE_URL = "https://grimoire.laeradsphere.com/"
 _GRIMOIRE_PROFILE_NAME = "grimoire_persistent"
+_GRIMOIRE_COOKIE_DOMAIN = "laeradsphere.com"
+# How long a grimoire login cookie is kept on disk. Re-applied every time the
+# cookie is set by the site or loaded at startup, so it acts as a sliding window.
+GRIMOIRE_COOKIE_DAYS = 14
 
 _shared_profile: "Optional[QWebEngineProfile]" = None
+
+
+def _extend_grimoire_cookie(store, cookie) -> None:
+    """Stretch a grimoire cookie's lifetime to GRIMOIRE_COOKIE_DAYS.
+
+    Session cookies (no expiry) and short-lived ones would otherwise force a
+    re-login on restart or after a day or two. Only lengthens: an already-expired
+    cookie (the site logging us out) or one that already lives long enough is left
+    alone, which also stops our own setCookie() from re-triggering this forever.
+    """
+    from PyQt6.QtCore import QDateTime
+    domain = cookie.domain().lstrip(".")
+    if not (domain == _GRIMOIRE_COOKIE_DOMAIN
+            or domain.endswith("." + _GRIMOIRE_COOKIE_DOMAIN)):
+        return
+    now = QDateTime.currentDateTimeUtc()
+    target = now.addDays(GRIMOIRE_COOKIE_DAYS)
+    if not cookie.isSessionCookie():
+        expiry = cookie.expirationDate()
+        if expiry <= now or expiry >= now.addDays(GRIMOIRE_COOKIE_DAYS - 1):
+            return
+    cookie.setExpirationDate(target)
+    store.setCookie(cookie)
 
 
 def shared_grimoire_profile() -> "QWebEngineProfile":
@@ -53,8 +80,13 @@ def shared_grimoire_profile() -> "QWebEngineProfile":
     global _shared_profile
     if _shared_profile is None:
         _shared_profile = QWebEngineProfile(_GRIMOIRE_PROFILE_NAME)
+        # Force: session cookies are written to disk too, so a login whose
+        # cookie has no expiry survives an app restart.
         _shared_profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        store = _shared_profile.cookieStore()
+        store.cookieAdded.connect(lambda c: _extend_grimoire_cookie(store, c))
+        store.loadAllCookies()
     return _shared_profile
 
 
