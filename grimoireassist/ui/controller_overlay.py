@@ -13,7 +13,9 @@ position is kept as a fraction of the free space so it holds its relative place
 (and never lands off-screen) when the window is resized.
 
 The header strip names the current pair and carries a chevron that folds the
-diagram down to a compact pill, in place. `geometry_changed` and
+panel sideways into a drawer handle: a slim vertical tab hugging whichever side
+edge of the host the panel sat closer to. Clicking the tab slides the panel back
+out to where it was; dragging it moves it along (or across to the other) edge. `geometry_changed` and
 `collapsed_changed` fire once per gesture so the host can persist the state.
 
 It doubles as the *merged overlay panel*: `attach_guest()` takes the input
@@ -30,7 +32,7 @@ from typing import Optional
 from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen,
                          QPolygonF)
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from .controllers import (DEFAULT_LEFT, DEFAULT_RIGHT, ControllerLayout,
                           get_layout)
@@ -67,6 +69,13 @@ _DIAMOND_CY = 90.0         # diamond centre within the body
 _DIAMOND_OFF = 50.0        # centre-to-centre distance out to each button
 
 _GRIP = 16                 # bottom-right resize handle, in real px
+
+# The collapsed drawer handle: a vertical tab flush against a side edge, its
+# label reading bottom-to-top. Only the corners facing into the host are round.
+_SIDE_TAB_W = 24
+_SIDE_TAB_PAD = 18         # space above and below the label
+_SIDE_TAB_R = 7.0
+_SIDE_TAB_SPACING = 1.6    # letter spacing of the label, px
 
 # Page keys. The pad diagram is drawn by this widget; the input page is a guest
 # widget the host hands over (see attach_guest).
@@ -166,12 +175,14 @@ class ControllerMapOverlay(QWidget):
         self._fx = _clamp01(fx)   # position as a fraction of the free space,
         self._fy = _clamp01(fy)   # so a resized host keeps it in proportion
         self._hover_chevron = False
+        self._hover_tab = False     # pointer over the collapsed drawer handle
+        self._tab_dragged = False   # the current press on the handle moved it
+        self._just_opened = False   # a handle click opened us; eat its dblclick
         self._move: Optional[tuple] = None    # (press point, widget pos at press)
         self._resize: Optional[tuple] = None  # (press point, width at press)
         self._press_chevron = False
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setToolTip("Drag to move · chevron collapses · corner resizes")
         self._refit()
         parent.installEventFilter(self)
 
@@ -184,12 +195,14 @@ class ControllerMapOverlay(QWidget):
         self.update()
 
     def set_collapsed(self, collapsed: bool) -> None:
-        """Fold to the header pill, or unfold back to the user's width."""
+        """Fold into the side drawer handle, or slide back out to the stored
+        position and the user's width."""
         collapsed = bool(collapsed)
         if collapsed == self._collapsed:
             return
         self._collapsed = collapsed
-        self._refit(keep_pos=True)  # folds in place: the top-left stays put
+        self._hover_tab = self._hover_chevron = False
+        self._refit()  # both states place themselves from the fractions
         self.update()
         self.collapsed_changed.emit(collapsed)
 
@@ -296,19 +309,37 @@ class ControllerMapOverlay(QWidget):
         return (self._fx, self._fy, self._wanted)
 
     def _title(self) -> str:
-        """Header text for a single-page panel. Full pad names while expanded;
-        short ones in the pill, where the width is driven by the text itself.
-        With two pages the tab strip replaces this entirely."""
+        """Header text for a single-page panel. With two pages the tab strip
+        replaces this entirely."""
         if self._tab == INPUT_TAB:
-            return "Input" if self._collapsed else "Input preview"
-        if self._collapsed:
-            return f"{self._left.short} → {self._right.short}"
+            return "Input preview"
         return f"{self._left.name}  →  {self._right.name}"
+
+    def _side_label(self) -> str:
+        """The drawer handle's label: short names, since its length is the
+        handle's height."""
+        keys = [k for k, _ in self.tabs()]
+        if len(keys) > 1:
+            return f"{_PAD_LABEL} · {_INPUT_LABEL}".upper()
+        if keys == [INPUT_TAB]:
+            return _INPUT_LABEL.upper()
+        return f"{self._left.short} → {self._right.short}".upper()
 
     def _title_font(self) -> QFont:
         font = QFont(self.font())
         font.setPointSizeF(_TITLE_PT)
         return font
+
+    def _side_font(self) -> QFont:
+        font = self._title_font()
+        font.setBold(True)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing,
+                              _SIDE_TAB_SPACING)
+        return font
+
+    def _docked_left(self) -> bool:
+        """Which edge the drawer handle hugs: the one the panel sat nearer."""
+        return self._fx < 0.5
 
     # ---- sizing ----------------------------------------------------------
     def _tab_rects(self) -> list[tuple[str, QRect]]:
@@ -326,14 +357,11 @@ class ControllerMapOverlay(QWidget):
             x += w + _TAB_GAP
         return out
 
-    def _collapsed_width(self) -> int:
-        """The pill is only as wide as its header content needs."""
-        rects = self._tab_rects()
-        if rects:
-            return int(rects[-1][1].right() + 8 + _CHEVRON_W + 8)
-        metrics = QFontMetrics(self._title_font())
-        return int(metrics.horizontalAdvance(self._title())
-                   + 12 + 8 + _CHEVRON_W + 8)
+    def _side_tab_length(self) -> int:
+        """The handle is only as tall as its label needs."""
+        metrics = QFontMetrics(self._side_font())
+        return int(metrics.horizontalAdvance(self._side_label())
+                   + 2 * _SIDE_TAB_PAD)
 
     def _body_aspect(self) -> float:
         """Width-to-height ratio of the page in the body. The pad diagram has a
@@ -354,7 +382,8 @@ class ControllerMapOverlay(QWidget):
             max_w = max(MIN_WIDTH, host.width() - 2 * _MARGIN)
             max_h = max(_HEADER_H, host.height() - 2 * _MARGIN)
         if self._collapsed:
-            return (min(self._collapsed_width(), max_w), _HEADER_H)
+            return (_SIDE_TAB_W, max(_HEADER_H, min(self._side_tab_length(),
+                                                    max_h)))
         width = min(self._wanted, max_w)
         body_h = max_h - _HEADER_H
         if body_h > 0:
@@ -368,7 +397,12 @@ class ControllerMapOverlay(QWidget):
         if (width, height) != (self.width(), self.height()):
             self.setFixedSize(width, height)
         self._layout_guest()
-        if keep_pos:
+        self.setToolTip(
+            "Click to open · drag along the edge to move" if self._collapsed
+            else "Drag to move · chevron collapses · corner resizes")
+        if self._collapsed:
+            self._place_side_tab()
+        elif keep_pos:
             # A collapse or a grip drag anchors the top-left corner.
             self._move_within_host(self.x(), self.y())
             self._store_fractions()
@@ -394,6 +428,36 @@ class ControllerMapOverlay(QWidget):
         free_w, free_h = self._free_space()
         self._move_within_host(round(self._fx * free_w),
                                round(self._fy * free_h))
+
+    def _place_side_tab(self) -> None:
+        """Flush against the docking edge, at the stored height. `_fx` is left
+        alone — it is the expanded panel's spot to slide back out to."""
+        host = self.parentWidget()
+        if host is None:
+            return
+        _free_w, free_h = self._free_space()
+        x = 0 if self._docked_left() else max(0, host.width() - self.width())
+        self.move(x, min(max(0, round(self._fy * free_h)), free_h))
+
+    def _drag_side_tab(self, global_pos) -> None:
+        """Slide the handle along its edge; crossing the host's midline swaps
+        edges, mirroring where the panel will open."""
+        host = self.parentWidget()
+        start, origin = self._move
+        if host is not None:
+            want_left = host.mapFromGlobal(global_pos).x() < host.width() / 2
+            if want_left != self._docked_left():
+                fx = 1.0 - self._fx
+                if want_left and fx >= 0.5:
+                    fx = 0.0
+                elif not want_left and fx < 0.5:
+                    fx = 1.0
+                self._fx = fx
+        _free_w, free_h = self._free_space()
+        y = min(max(0, origin.y() + global_pos.y() - start.y()), free_h)
+        if free_h:
+            self._fy = y / free_h
+        self._place_side_tab()
 
     def _store_fractions(self) -> None:
         """Record where the user put it, as a share of the free space."""
@@ -431,6 +495,12 @@ class ControllerMapOverlay(QWidget):
         if ev.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(ev)
             return
+        self._just_opened = False
+        if self._collapsed:
+            self._move = (ev.globalPosition().toPoint(), self.pos())
+            self._tab_dragged = False
+            ev.accept()
+            return
         pos = ev.position().toPoint()
         hit_tab = self._tab_at(pos)
         if self._chevron_rect().contains(pos):
@@ -444,6 +514,23 @@ class ControllerMapOverlay(QWidget):
         ev.accept()
 
     def mouseMoveEvent(self, ev) -> None:
+        if self._collapsed:
+            if self._move is not None:
+                pos = ev.globalPosition().toPoint()
+                if (not self._tab_dragged
+                        and (pos - self._move[0]).manhattanLength()
+                        >= QApplication.startDragDistance()):
+                    self._tab_dragged = True
+                if self._tab_dragged:
+                    self._drag_side_tab(pos)
+                ev.accept()
+                return
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            if not self._hover_tab:
+                self._hover_tab = True
+                self.update()
+            super().mouseMoveEvent(ev)
+            return
         if self._resize is not None:
             start, base = self._resize
             pos = ev.globalPosition().toPoint()
@@ -473,6 +560,17 @@ class ControllerMapOverlay(QWidget):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self._collapsed and self._move is not None:
+            self._move = None
+            if self._tab_dragged:
+                self._tab_dragged = False
+                self._emit_geometry()
+                self.update()
+            else:
+                self._just_opened = True
+                self.set_collapsed(False)
+            ev.accept()
+            return
         if self._press_chevron:
             self._press_chevron = False
             # Only a release still on the chevron counts, so a sloppy drag that
@@ -500,6 +598,12 @@ class ControllerMapOverlay(QWidget):
         super().mouseReleaseEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:
+        if self._just_opened or self._collapsed:
+            # The second click of a double-click on the handle: the first one
+            # already opened the panel, so don't let this fold it straight back.
+            self._just_opened = False
+            ev.accept()
+            return
         pos = ev.position().toPoint()
         if (ev.button() == Qt.MouseButton.LeftButton
                 and self._header_rect().contains(pos)
@@ -520,6 +624,7 @@ class ControllerMapOverlay(QWidget):
 
     def leaveEvent(self, ev) -> None:
         self._hover_chevron = False
+        self._hover_tab = False
         self.unsetCursor()
         self.update()
         super().leaveEvent(ev)
@@ -528,9 +633,12 @@ class ControllerMapOverlay(QWidget):
     def paintEvent(self, ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._collapsed:
+            self._paint_side_tab(p)
+            return
         self._paint_backdrop(p)
         self._paint_header(p)
-        if self._collapsed or self._tab != PAD_TAB:
+        if self._tab != PAD_TAB:
             return   # the input page is a real widget, drawn over the backdrop
         p.save()
         p.translate(0.0, float(_HEADER_H))
@@ -548,6 +656,26 @@ class ControllerMapOverlay(QWidget):
         p.setBrush(_BACKDROP)
         p.drawRoundedRect(QRectF(0.0, 0.0, self.width(), self.height()), 10, 10)
 
+    def _paint_side_tab(self, p: QPainter) -> None:
+        """The drawer handle. The rounded rect runs past the docking edge so
+        only the inward corners show round; the label reads bottom-to-top."""
+        w, h = float(self.width()), float(self.height())
+        r = _SIDE_TAB_R
+        body = (QRectF(-r, 0.0, w + r, h) if self._docked_left()
+                else QRectF(0.0, 0.0, w + r, h))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_BACKDROP)
+        p.drawRoundedRect(body, r, r)
+        p.save()
+        p.translate(w / 2, h / 2)
+        p.rotate(-90)
+        p.setFont(self._side_font())
+        lit = self._hover_tab or self._move is not None
+        p.setPen(QColor(_TEXT if lit else _MUTED))
+        p.drawText(QRectF(-h / 2, -w / 2, h, w), Qt.AlignmentFlag.AlignCenter,
+                   self._side_label())
+        p.restore()
+
     def _paint_header(self, p: QPainter) -> None:
         font = self._title_font()
         p.setFont(font)
@@ -563,9 +691,8 @@ class ControllerMapOverlay(QWidget):
                        QFontMetrics(font).elidedText(
                            self._title(), Qt.TextElideMode.ElideRight,
                            box.width()))
-        if not self._collapsed:
-            p.setPen(QPen(QColor(_BORDER), 1.0))
-            p.drawLine(1, _HEADER_H, self.width() - 2, _HEADER_H)
+        p.setPen(QPen(QColor(_BORDER), 1.0))
+        p.drawLine(1, _HEADER_H, self.width() - 2, _HEADER_H)
         self._paint_chevron(p)
 
     def _paint_tabs(self, p: QPainter, rects: list) -> None:
@@ -584,17 +711,17 @@ class ControllerMapOverlay(QWidget):
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_chevron(self, p: QPainter) -> None:
-        """Points up while expanded (click folds it), down while collapsed."""
+        """Points at the docking edge: a click folds the panel that way."""
         box = self._chevron_rect()
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(_BORDER_HI if self._hover_chevron else _BORDER), 1.0))
         p.drawRoundedRect(QRectF(box), 4, 4)
         cx, cy = box.center().x() + 0.5, box.center().y() + 0.5
         arm, rise = 4.0, 2.0
-        tip = -rise if self._collapsed else rise
+        tip = -rise if self._docked_left() else rise
         p.setPen(QPen(QColor(_TEXT), 1.4))
-        p.drawLine(QPointF(cx - arm, cy + tip), QPointF(cx, cy - tip))
-        p.drawLine(QPointF(cx, cy - tip), QPointF(cx + arm, cy + tip))
+        p.drawLine(QPointF(cx - tip, cy - arm), QPointF(cx + tip, cy))
+        p.drawLine(QPointF(cx + tip, cy), QPointF(cx - tip, cy + arm))
 
     def _paint_pad(self, p: QPainter, pad: ControllerLayout, x0: float) -> None:
         """One pad in body design units, its column starting at x0."""

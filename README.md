@@ -162,7 +162,7 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Auto Switch** — shows the detected monsters while in a fight; 1 minute after the last
     monster disappears it switches to your full Grimoire notes. The app opens on this view.
   - **Grimoire** — locks to the notes view; no auto-switching.
-- **View buttons** — **🎯 / 📖** flips the main pane between the tracking view and your Grimoire
+- **View buttons** — **📕 / 📖** flips the main pane between the tracking view and your Grimoire
   notes, and **🌐** opens the browser drawer. The two sit side by side at the right of the navbar,
   drawn larger than the rest of the bar: they are the ones you hit mid-fight.
 

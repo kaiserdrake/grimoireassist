@@ -202,17 +202,18 @@ def test_position_is_proportional_across_hosts(app, host):
 
 
 # ---- collapsing --------------------------------------------------------
-def test_collapse_folds_in_place_and_restores(host):
-    overlay = ControllerMapOverlay(host, "playstation", "switch", width=420)
+def test_collapse_folds_into_a_side_handle_and_restores(host):
+    overlay = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                   fx=0.8, fy=0.3)
     before_pos, before_size = overlay.pos(), overlay.size()
     reported = []
     overlay.collapsed_changed.connect(reported.append)
 
     overlay.set_collapsed(True)
     assert overlay.is_collapsed()
-    assert overlay.pos() == before_pos          # folds from the top-left
-    assert overlay.height() < before_size.height()
+    assert overlay.height() > overlay.width()   # a vertical tab
     assert overlay.width() < before_size.width()
+    assert overlay.x() + overlay.width() == host.width()  # flush right
     assert reported == [True]
 
     overlay.set_collapsed(True)                 # already folded: no-op
@@ -232,10 +233,64 @@ def test_chevron_click_toggles_collapse(host):
     _release(overlay, chevron)
     assert overlay.is_collapsed()
 
-    chevron = QPointF(overlay._chevron_rect().center())  # the pill is narrower
-    _press(overlay, chevron)
-    _release(overlay, chevron)
+    tab = QPointF(overlay.width() / 2, overlay.height() / 2)
+    _press(overlay, tab)                     # the whole handle opens it
+    _release(overlay, tab)
     assert not overlay.is_collapsed()
+
+
+def test_handle_docks_to_the_nearer_edge(host):
+    left = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                fx=0.1, collapsed=True)
+    right = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                 fx=0.9, collapsed=True)
+    assert left.x() == 0
+    assert right.x() + right.width() == host.width()
+
+
+def test_double_click_on_the_handle_does_not_fold_it_back(host):
+    overlay = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                   collapsed=True)
+    tab = QPointF(overlay.width() / 2, overlay.height() / 2)
+    _press(overlay, tab)
+    _release(overlay, tab)
+    assert not overlay.is_collapsed()
+    overlay.mouseDoubleClickEvent(_event(
+        QMouseEvent.Type.MouseButtonDblClick, QPointF(20, 10),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton))
+    assert not overlay.is_collapsed()
+
+
+def test_dragging_the_handle_slides_it_along_the_edge(host):
+    overlay = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                   fx=0.9, fy=0.0, collapsed=True)
+    reported = []
+    overlay.geometry_changed.connect(lambda *a: reported.append(a))
+    corner = host.mapToGlobal(overlay.pos())  # the edge test is in host coords
+    start = QPointF(corner.x() + 10, corner.y() + 10)
+    _press(overlay, start)
+    _move(overlay, QPointF(start.x(), start.y() + 200))
+    _release(overlay, QPointF(start.x(), start.y() + 200))
+    assert overlay.is_collapsed()                # a drag never opens it
+    assert overlay.y() == 200
+    assert overlay.x() + overlay.width() == host.width()
+    assert len(reported) == 1
+    fx, fy, _w = reported[0]
+    assert fx == pytest.approx(0.9)              # the open spot is kept
+    assert fy == pytest.approx(200 / (host.height() - overlay.height()))
+
+
+def test_dragging_the_handle_across_swaps_edges(host):
+    overlay = ControllerMapOverlay(host, "playstation", "switch", width=420,
+                                   fx=0.8, collapsed=True)
+    host_pos = host.mapToGlobal(overlay.pos())
+    start = QPointF(host_pos.x() + 5, host_pos.y() + 5)
+    _press(overlay, start)
+    target = host.mapToGlobal(host.rect().topLeft())
+    _move(overlay, QPointF(target.x() + 50, start.y()))
+    _release(overlay, QPointF(target.x() + 50, start.y()))
+    assert overlay.x() == 0
+    assert overlay.geometry_setting()[0] == pytest.approx(0.2)
 
 
 def test_release_away_from_the_chevron_does_not_toggle(host):

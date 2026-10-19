@@ -2074,7 +2074,7 @@ class MainWindow(QMainWindow):
             self.grimoire_btn.setText("📖")
             self.grimoire_btn.setToolTip("Grimoire view — click for Tracking view")
         else:
-            self.grimoire_btn.setText("🎯")
+            self.grimoire_btn.setText("📕")
             self.grimoire_btn.setToolTip("Tracking view — click for Grimoire view")
 
     # ================= calibration =================
