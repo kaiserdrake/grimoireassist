@@ -95,6 +95,7 @@ class OcrConfig:
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
     regions_battle_end: Region = field(default_factory=Region)
     regions_dialogue: Region = field(default_factory=Region)
+    regions_labels: Region = field(default_factory=Region)
     keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
 
     def gpu_effective(self) -> bool:
@@ -112,10 +113,12 @@ class OcrConfig:
 class GameSettings:
     """Per-game OCR layout: the monster name region(s), an optional Battle-End
     trigger region, the keyword text that marks the battle end, and an optional
-    dialogue region whose prose is read aloud (see speech.py)."""
+    dialogue region whose prose is read aloud (see speech.py), and an optional
+    labels region over a map or menu whose labels are listed as terms (terms.py)."""
     monster_names: List[Region] = field(default_factory=lambda: [Region()])
     battle_end: Region = field(default_factory=Region)
     dialogue: Region = field(default_factory=Region)
+    labels: Region = field(default_factory=Region)
     end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
     monster_persist_s: Optional[float] = None       # overrides ocr.monster_persist_s when set
     monster_persist_end_s: Optional[float] = None   # overrides ocr.monster_persist_end_s when set
@@ -241,6 +244,7 @@ def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
             monster_names=[_region(r) for r in mons],
             battle_end=_region(regions.get("battle_end")),
             dialogue=_region(regions.get("dialogue")),
+            labels=_region(regions.get("labels")),
             end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
             monster_persist_s=float(raw_p) if raw_p is not None else None,
             monster_persist_end_s=float(raw_pe) if raw_pe is not None else None,
@@ -258,6 +262,7 @@ def _save_game_settings(path: "Path", gs: "GameSettings") -> None:
             "monster_names": [asdict(r) for r in gs.monster_names],
             "battle_end": asdict(gs.battle_end),
             "dialogue": asdict(gs.dialogue),
+            "labels": asdict(gs.labels),
         },
         "keywords": {
             "battle_end": gs.end_keywords,
@@ -372,6 +377,7 @@ class Config:
                 monster_names=[_region(r) for r in mons],
                 battle_end=_region(regions.get("battle_end")),
                 dialogue=_region(regions.get("dialogue")),
+                labels=_region(regions.get("labels")),
                 end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
                 monster_persist_s=float(raw_persist) if raw_persist is not None else None,
                 monster_persist_end_s=float(raw_persist_end) if raw_persist_end is not None else None,

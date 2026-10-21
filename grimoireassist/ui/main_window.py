@@ -6,25 +6,26 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
+from urllib.parse import quote, unquote
 
 import html
 import re
 import threading
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import (
-    QAction, QActionGroup, QColor, QGuiApplication, QIcon, QKeySequence,
-    QPainter, QPen, QShortcut,
+    QAction, QActionGroup, QColor, QDesktopServices, QGuiApplication, QIcon,
+    QKeySequence, QPainter, QPen, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTextEdit,
-    QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QSizePolicy, QSplitter, QTextEdit, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
-from ..battle import OcrWorker
+from ..battle import OcrWorker, ScanThread
 from ..capture import CaptureThread, FrameBuffer, list_named_devices
 from ..config import Config, GameSettings
 from ..games import (
@@ -37,8 +38,9 @@ from ..ocr import build_engine
 from ..overlay import OverlayModel
 from ..reviewbuffer import RollingRecorder
 from ..speech import BACKENDS, EdgeNeuralBackend, Speaker
+from ..terms import Lexicon, Term, TermLog, find_terms
 from ..virtualcam import VirtualCamSink
-from .browser import BrowserPanel, SEARCH_ENGINES
+from .browser import BrowserPanel, SEARCH_ENGINES, build_search_url
 from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
@@ -64,6 +66,19 @@ _DIALOGUE_STAMP = "#7f7f93"      # timestamp: present but never competing with t
 _DIALOGUE_HEADER = "#e0a94f"     # box header / speaker label: shown, never spoken
 _DIALOGUE_SELECTED = "#33335a"   # the picked line, for replaying it
 _DIALOGUE_MAX_LINES = 200
+
+# Copyable terms (names, places, items), by kind: (background, text). Dark tints,
+# so a highlighted name still reads as part of the line around it.
+_TERM_COLOURS = {
+    "monster":   ("#4a1f1f", "#ffb0a0"),
+    "location":  ("#16384a", "#9fd4f0"),
+    "item":      ("#3d3112", "#f2cf7a"),
+    "character": ("#33244a", "#d6b8f5"),
+    "term":      ("#2e2e3c", "#c8c8d8"),
+}
+_TERM_HREF = "term:"
+_TERM_CHIPS_SHOWN = 12     # the rest are one click away under "All"
+_TERM_CHIP_CHARS = 28
 
 
 # The Grimoire and Browser toolbar buttons: emoji glyphs, deliberately larger
@@ -135,6 +150,10 @@ class _DialogueLog(QTextEdit):
 
     entry_clicked = pyqtSignal(int)
     entry_activated = pyqtSignal(int)   # double-click: pick and replay in one go
+    # A highlighted term inside a line: clicked (copy it), or right-clicked
+    # (its menu, at this global position).
+    term_clicked = pyqtSignal(str)
+    term_menu = pyqtSignal(str, object)
 
     def _entry_at(self, pos) -> Optional[int]:
         anchor = self.anchorAt(pos)
@@ -145,17 +164,62 @@ class _DialogueLog(QTextEdit):
         except ValueError:
             return None
 
+    def _term_at(self, pos) -> Optional[str]:
+        anchor = self.anchorAt(pos)
+        if anchor.startswith(_TERM_HREF):
+            return unquote(anchor[len(_TERM_HREF):]) or None
+        return None
+
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        term = self._term_at(event.pos())
+        if term is not None:
+            self.term_clicked.emit(term)
+            return
         seq = self._entry_at(event.pos())
         if seq is not None:
             self.entry_clicked.emit(seq)
 
     def mouseDoubleClickEvent(self, event) -> None:
         super().mouseDoubleClickEvent(event)
+        if self._term_at(event.pos()) is not None:
+            return          # a term was copied on the first click; don't replay
         seq = self._entry_at(event.pos())
         if seq is not None:
             self.entry_activated.emit(seq)
+
+    def contextMenuEvent(self, event) -> None:
+        term = self._term_at(event.pos())
+        if term is not None:
+            self.term_menu.emit(term, event.globalPos())
+            return
+        super().contextMenuEvent(event)
+
+
+def _dialogue_line_html(seq: int, text: str, spans) -> str:
+    """One transcript line: plain stretches pick the row, highlighted terms copy.
+
+    Qt's rich text has no nested anchors, so the row's anchor is closed around
+    each term rather than wrapping the whole line."""
+    row = ('<a href="{seq}" style="text-decoration:none;">'
+           '<span style="font-size:13pt; color:{fg};">{t}</span></a>')
+    out, pos = [], 0
+    for start, end, term in spans:
+        if start > pos:
+            out.append(row.format(seq=seq, fg=_TRACKING_FG,
+                                  t=html.escape(text[pos:start])))
+        bg, fg = _TERM_COLOURS.get(term.kind, _TERM_COLOURS["term"])
+        out.append(
+            '<a href="{href}" style="text-decoration:none;">'
+            '<span style="font-size:13pt; background-color:{bg}; color:{fg};">'
+            '{t}</span></a>'.format(href=_TERM_HREF + quote(term.text), bg=bg,
+                                    fg=fg, t=html.escape(text[start:end])))
+        pos = end
+    if pos < len(text):
+        out.append(row.format(seq=seq, fg=_TRACKING_FG, t=html.escape(text[pos:])))
+    return "".join(out)
 
 
 class MainWindow(QMainWindow):
@@ -203,6 +267,12 @@ class MainWindow(QMainWindow):
             maxlen=_DIALOGUE_MAX_LINES)
         self._dialogue_seq = 0
         self._dialogue_selected: Optional[int] = None   # picked entry's sequence
+        # Copyable terms: the chip strip's list, each transcript line's
+        # highlighted spans by sequence, and the game's known names.
+        self._terms = TermLog()
+        self._dialogue_spans: Dict[int, list] = {}
+        self._lexicon = Lexicon()
+        self._scan_thread = None
         # What the user asked for, which is not the same as what is on screen:
         # the strip belongs to the tracking view and stays hidden on the Grimoire.
         self._dialogue_wanted = False
@@ -358,10 +428,14 @@ class MainWindow(QMainWindow):
         self.game = game
         self.cfg.selected_game = game.id
         self.cfg.monster_name_list = monster_names(game.id, self.cfg._path)
+        self._lexicon = Lexicon.load(game.id, self.cfg._path)
+        if self.worker is not None:
+            self.worker.lexicon = self._lexicon
         gs = self.cfg.regions_for(game.id)
         self.cfg.ocr.regions_monster_names = gs.monster_names
         self.cfg.ocr.regions_battle_end = gs.battle_end
         self.cfg.ocr.regions_dialogue = gs.dialogue
+        self.cfg.ocr.regions_labels = gs.labels
         self.cfg.ocr.keywords_battle_end = gs.end_keywords
         self.cfg.save()
         self.setWindowTitle(f"GrimoireAssist {__version__} — {game.name}")
@@ -469,6 +543,9 @@ class MainWindow(QMainWindow):
         self.worker.debug_text.connect(self._on_debug_text)
         self.worker.region_status.connect(self._preview.set_region_status)
         self.worker.dialogue_text.connect(self._on_dialogue_text)
+        self.worker.lexicon = self._lexicon
+        self.worker.labels_seen.connect(self._on_terms_found)
+        self.worker.screen_terms.connect(self._on_screen_scanned)
         self.worker.start()
 
     def _stop_worker(self) -> None:
@@ -747,6 +824,20 @@ class MainWindow(QMainWindow):
         self.act_auto_track.setCheckable(True)
         self.act_auto_track.setChecked(self.cfg.ui.auto_start_tracking)
         self.act_auto_track.toggled.connect(self._toggle_auto_start_tracking)
+        # Text read off the screen: the dialogue log and the copyable terms
+        # in it. Not under Speech — the terms are wanted with the voice off.
+        text_menu = menu_ocr.addMenu("Text")
+        self.act_dialogue_log = text_menu.addAction("Show dialogue log")
+        self.act_dialogue_log.setCheckable(True)
+        self.act_dialogue_log.setChecked(False)
+        self.act_dialogue_log.toggled.connect(self._toggle_dialogue_panel)
+        self.act_test_box = text_menu.addAction("Show test line box")
+        self.act_test_box.setCheckable(True)
+        self.act_test_box.setChecked(self.cfg.ui.dialogue_test_box)
+        self.act_test_box.setToolTip(
+            "The type-a-line box inside the dialogue log")
+        self.act_test_box.toggled.connect(self._toggle_dialogue_test_box)
+        text_menu.addAction("Scan screen for terms\tF8", self._scan_screen_terms)
 
         # ── Speech ───────────────────────────────────────────────
         menu_speech = self.menu.addMenu("🔊  Speech")
@@ -762,16 +853,6 @@ class MainWindow(QMainWindow):
         self.act_mute.setChecked(self.cfg.speech.muted)
         self.act_mute.setToolTip("Silence the voice; keep detecting and logging")
         self.act_mute.toggled.connect(self._set_muted)
-        self.act_dialogue_log = menu_speech.addAction("Show dialogue log")
-        self.act_dialogue_log.setCheckable(True)
-        self.act_dialogue_log.setChecked(False)
-        self.act_dialogue_log.toggled.connect(self._toggle_dialogue_panel)
-        self.act_test_box = menu_speech.addAction("Show test line box")
-        self.act_test_box.setCheckable(True)
-        self.act_test_box.setChecked(self.cfg.ui.dialogue_test_box)
-        self.act_test_box.setToolTip(
-            "The type-a-line box inside the dialogue log")
-        self.act_test_box.toggled.connect(self._toggle_dialogue_test_box)
         backend_menu = menu_speech.addMenu("Voice source")
         backend_group = QActionGroup(backend_menu)
         backend_group.setExclusive(True)
@@ -1035,6 +1116,7 @@ class MainWindow(QMainWindow):
         self._update_vcam_label()
 
     def _build_shortcuts(self) -> None:
+        QShortcut(QKeySequence(Qt.Key.Key_F8),  self, activated=self._scan_screen_terms)
         QShortcut(QKeySequence(Qt.Key.Key_F9),  self, activated=self._open_calibration)
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fullscreen)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_browser)
@@ -1200,6 +1282,14 @@ class MainWindow(QMainWindow):
         rlay.addWidget(self._dialogue_backend_lbl)
         rlay.addStretch()
 
+        scan_btn = QPushButton("Scan screen")
+        scan_btn.setFixedWidth(82)
+        scan_btn.setStyleSheet(_btn_style)
+        scan_btn.setToolTip("Read the whole screen once for names, places and items"
+                            " (F8) — for a map or menu with no labels region")
+        scan_btn.clicked.connect(self._scan_screen_terms)
+        rlay.addWidget(scan_btn)
+
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setFixedWidth(62)
         self.stop_btn.setStyleSheet(_btn_style)
@@ -1246,6 +1336,8 @@ class MainWindow(QMainWindow):
         blay.setContentsMargins(0, 0, 0, 0)
         blay.setSpacing(4)
 
+        blay.addWidget(self._build_term_strip())
+
         # Rich text, not plain: each entry carries its own banding and a
         # timestamp styled apart from the prose it belongs to.
         self._dialogue_log = _DialogueLog()
@@ -1260,6 +1352,8 @@ class MainWindow(QMainWindow):
             | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self._dialogue_log.entry_clicked.connect(self._select_dialogue_entry)
         self._dialogue_log.entry_activated.connect(self._replay_entry)
+        self._dialogue_log.term_clicked.connect(self._copy_term)
+        self._dialogue_log.term_menu.connect(self._show_term_menu)
         clear_btn.clicked.connect(self._clear_dialogue_log)
         blay.addWidget(self._dialogue_log)
 
@@ -1540,6 +1634,7 @@ class MainWindow(QMainWindow):
         # appendleft keeps the newest first; the deque's maxlen then drops the
         # OLDEST entry off the far end, which is the only correct direction.
         self._dialogue_entries.appendleft((self._dialogue_seq, ts, header, text))
+        self._record_dialogue_terms(self._dialogue_seq, header, text)
         self._render_dialogue_log()
         tag = "muted" if self.cfg.speech.muted else (
             self.speaker.current_backend() if self.speaker else "off")
@@ -1559,22 +1654,27 @@ class MainWindow(QMainWindow):
         rows = []
         for seq, ts, header, text in self._dialogue_entries:
             picked = seq == self._dialogue_selected
-            label = ('<span style="color:{c}; font-size:10pt; font-weight:600;">'
-                     ' {h}</span>'.format(c=_DIALOGUE_HEADER,
-                                          h=html.escape(header))
+            # The header is a name in its own right — the speaker — so it is a
+            # copyable term too, kept in its own colour.
+            label = ('<a href="{href}" style="text-decoration:none;">'
+                     '<span style="color:{c}; font-size:10pt; font-weight:600;">'
+                     ' {h}</span></a>'.format(
+                         href=_TERM_HREF + quote(header), c=_DIALOGUE_HEADER,
+                         h=html.escape(header))
                      if header else "")
+            # Spans index the bare text; the line is shown after a space.
+            spans = [(s + 1, e + 1, t)
+                     for s, e, t in self._dialogue_spans.get(seq, ())]
             rows.append(
                 '<tr><td style="background:{bg}; padding:4px 7px;">'
                 '<a href="{seq}" style="text-decoration:none;">'
-                '<span style="color:{stamp}; font-size:10pt;">[{ts}]</span>'
-                '{label}'
-                '<span style="font-size:13pt; color:{fg};"> {text}</span>'
-                '</a></td></tr>'.format(
+                '<span style="color:{stamp}; font-size:10pt;">[{ts}]</span></a>'
+                '{label}{line}</td></tr>'.format(
                     seq=seq, label=label,
                     bg=(_DIALOGUE_SELECTED if picked
                         else _DIALOGUE_ROWS[seq % len(_DIALOGUE_ROWS)]),
-                    stamp="#c8c8e0" if picked else _DIALOGUE_STAMP,
-                    fg=_TRACKING_FG, ts=ts, text=html.escape(text)))
+                    stamp="#c8c8e0" if picked else _DIALOGUE_STAMP, ts=ts,
+                    line=_dialogue_line_html(seq, " " + text, spans)))
         self._dialogue_log.setHtml(
             '<table width="100%" cellspacing="0" cellpadding="0"'
             ' style="font-family:Segoe UI, sans-serif;">{}</table>'.format(
@@ -1606,9 +1706,177 @@ class MainWindow(QMainWindow):
 
     def _clear_dialogue_log(self) -> None:
         self._dialogue_entries.clear()
+        self._dialogue_spans.clear()
         self._dialogue_selected = None
         self.replay_btn.setEnabled(False)
         self._dialogue_log.clear()
+        self._terms.clear()
+        self._refresh_term_chips()
+
+    # ── copyable terms ──────────────────────────────────────────────────
+    def _record_dialogue_terms(self, seq: int, header: str, text: str) -> None:
+        """Find the terms in a new transcript line and add them to the chips."""
+        spans = find_terms(text, self._lexicon)
+        self._dialogue_spans[seq] = spans
+        # Spans of lines that have fallen off the end of the log go with them.
+        live = {entry[0] for entry in self._dialogue_entries}
+        for old in [k for k in self._dialogue_spans if k not in live]:
+            del self._dialogue_spans[old]
+        terms = [t for _s, _e, t in spans]
+        if header:
+            hit = self._lexicon.resolve(header)
+            terms.insert(0, Term(hit[0], hit[1]) if hit
+                         else Term(header, "character"))
+        self._terms.extend(terms)
+        self._refresh_term_chips()
+
+    def _build_term_strip(self) -> QWidget:
+        """The chip strip: recent terms, newest first, click to copy.
+
+        One row, clipped rather than wrapped, so it never pushes the transcript
+        down; "All" lists everything the row has no room for."""
+        strip = QWidget()
+        lay = QHBoxLayout(strip)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lbl = QLabel("Terms")
+        lbl.setStyleSheet("color:#7f7f93; font-size:11px;")
+        lay.addWidget(lbl)
+
+        host = QWidget()
+        self._term_chips_lay = QHBoxLayout(host)
+        self._term_chips_lay.setContentsMargins(0, 0, 0, 0)
+        self._term_chips_lay.setSpacing(5)
+        self._term_chips_lay.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidget(host)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(38)
+        lay.addWidget(scroll, 1)
+
+        self._term_all_btn = QPushButton("All")
+        self._term_all_btn.setStyleSheet(
+            "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
+            " border-radius:3px; padding:2px 6px; font-size:11px; }"
+            "QPushButton:hover { background:#3a3a50; }")
+        self._term_all_btn.setToolTip("Every term seen this session")
+        self._term_all_btn.clicked.connect(self._show_all_terms)
+        lay.addWidget(self._term_all_btn)
+
+        self._term_strip = strip
+        strip.setVisible(False)          # shown once there is something in it
+        return strip
+
+    def _refresh_term_chips(self) -> None:
+        lay = getattr(self, "_term_chips_lay", None)
+        if lay is None:
+            return
+        while lay.count() > 1:           # keep the trailing stretch
+            item = lay.takeAt(0)
+            if item.widget() is not None:
+                # Detach now: deleteLater alone leaves the old chip painted
+                # under the new ones until the event loop gets to it.
+                item.widget().setParent(None)
+                item.widget().deleteLater()
+        terms = self._terms.terms()
+        for i, term in enumerate(terms[:_TERM_CHIPS_SHOWN]):
+            lay.insertWidget(i, self._term_chip(term))
+        self._term_all_btn.setText(f"All ({len(terms)})")
+        self._term_strip.setVisible(bool(terms))
+
+    def _term_chip(self, term: Term) -> QPushButton:
+        bg, fg = _TERM_COLOURS.get(term.kind, _TERM_COLOURS["term"])
+        text = term.text
+        if len(text) > _TERM_CHIP_CHARS:
+            text = text[:_TERM_CHIP_CHARS - 1] + "…"
+        chip = QPushButton(text)
+        # No border at all: a thin outline renders at uneven weights on a
+        # rounded chip, so hover lightens the fill instead.
+        chip.setStyleSheet(
+            "QPushButton { background:%s; color:%s; border:none; border-radius:12px;"
+            " padding:4px 12px; font-size:15px; }"
+            "QPushButton:hover { background:%s; }"
+            % (bg, fg, QColor(bg).lighter(150).name()))
+        chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        chip.setToolTip(f"{term.text}\n{term.kind} · from {term.source}\n"
+                        "Click to copy · right-click to search")
+        chip.clicked.connect(lambda _=False, t=term.text: self._copy_term(t))
+        chip.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        chip.customContextMenuRequested.connect(
+            lambda pos, t=term.text, c=chip: self._show_term_menu(t, c.mapToGlobal(pos)))
+        return chip
+
+    def _show_all_terms(self) -> None:
+        terms = self._terms.terms()
+        if not terms:
+            return
+        menu = QMenu(self)
+        for term in terms:
+            act = menu.addAction(f"{term.text}    ·  {term.kind}")
+            act.triggered.connect(lambda _=False, t=term.text: self._copy_term(t))
+        menu.exec(self._term_all_btn.mapToGlobal(
+            self._term_all_btn.rect().bottomLeft()))
+
+    def _show_term_menu(self, text: str, global_pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Copy", lambda: self._copy_term(text))
+        menu.addAction("Search in browser drawer", lambda: self._search_term(text, True))
+        menu.addAction("Search in default browser", lambda: self._search_term(text, False))
+        menu.exec(global_pos)
+
+    def _copy_term(self, text: str) -> None:
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(f'Copied "{text}"', 3000)
+
+    def _search_term(self, text: str, in_drawer: bool) -> None:
+        url = build_search_url(text, getattr(self.cfg.ui, "search_engine", "google"))
+        if in_drawer:
+            self._set_browser_open(True)
+            self.browser.new_tab(url)
+        else:
+            QDesktopServices.openUrl(QUrl(url))
+
+    @pyqtSlot(list)
+    def _on_terms_found(self, terms: list) -> None:
+        """New labels read off the labels region (a map or menu)."""
+        self._terms.extend(terms)
+        self._refresh_term_chips()
+
+    def _scan_screen_terms(self) -> None:
+        """F8: read the whole current frame once for terms.
+
+        Goes through the running worker when there is one, so the OCR engine is
+        only ever driven from one thread; otherwise a one-off thread does it."""
+        frame, _ = self.buffer.get()
+        if frame is None:
+            self.statusBar().showMessage("No frame captured yet — nothing to scan", 4000)
+            return
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.request_scan()
+        elif ScanThread is not None:
+            if self._scan_thread is not None and self._scan_thread.isRunning():
+                return
+            self._scan_thread = ScanThread(self.engine, frame.copy(), self._lexicon, self)
+            self._scan_thread.done.connect(self._on_screen_scanned)
+            self._scan_thread.start()
+        else:
+            return
+        self.statusBar().showMessage("Scanning the screen for names, places and items…")
+
+    @pyqtSlot(list)
+    def _on_screen_scanned(self, terms: list) -> None:
+        if not terms:
+            self.statusBar().showMessage("Scan found no names, places or items", 4000)
+            return
+        self._terms.extend(terms)
+        self._refresh_term_chips()
+        names = ", ".join(t.text for t in terms[:6])
+        more = f" (+{len(terms) - 6} more)" if len(terms) > 6 else ""
+        where = "" if self._dialogue_wanted else " — open the Dialogue panel to copy them"
+        self.statusBar().showMessage(f"Found {len(terms)}: {names}{more}{where}", 8000)
 
     def _select_dialogue_entry(self, seq: int) -> None:
         """Pick a line (or unpick it, if it was already the picked one)."""
@@ -2092,6 +2360,7 @@ class MainWindow(QMainWindow):
                     monster_names=self.cfg.ocr.regions_monster_names,
                     battle_end=self.cfg.ocr.regions_battle_end,
                     dialogue=self.cfg.ocr.regions_dialogue,
+                    labels=self.cfg.ocr.regions_labels,
                     end_keywords=self.cfg.ocr.keywords_battle_end,
                 )
                 self.cfg.set_regions_for(self.cfg.selected_game, gs)

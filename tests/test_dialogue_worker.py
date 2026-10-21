@@ -135,3 +135,66 @@ def test_dialogue_boxes_are_reported_in_frame_coordinates():
     worker, _cfg, _said = _worker(engine, region=Region(10, 150, 300, 60))
     worker._read_dialogue(_textured_frame(), 1.0)
     assert worker._dlg_boxes == [(15, 157, 100, 20)]
+
+
+# ── labels region (map / menu) ──────────────────────────────────────────────
+def _labels_worker(engine, speech=False):
+    cfg = Config()
+    cfg.speech.enabled = speech          # labels don't depend on narration
+    cfg.ocr.regions_labels = Region(10, 150, 300, 60)
+    worker = OcrWorker(cfg, None, engine)
+    seen = []
+    worker.labels_seen.connect(seen.append)
+    return worker, seen
+
+
+def _menu():
+    return [("Iron Sword", 0.9, (0, 0, 120, 18)), ("Mega Potion x3", 0.9, (0, 22, 140, 18))]
+
+
+def test_a_label_is_sent_after_two_matching_reads_and_only_once():
+    worker, seen = _labels_worker(_FakeEngine(_menu()))
+    worker._read_labels(_textured_frame(), 1.0)
+    assert seen == []                                   # one read: not trusted yet
+    worker._read_labels(_textured_frame(), 2.5)          # heartbeat re-read
+    assert [[t.text for t in batch] for batch in seen] == [["Iron Sword", "Mega Potion"]]
+    worker._read_labels(_textured_frame(), 4.0)
+    assert len(seen) == 1                               # same screen: not again
+
+
+def test_a_still_labels_region_is_not_re_read_before_the_heartbeat():
+    engine = _FakeEngine(_menu())
+    worker, _seen = _labels_worker(engine)
+    worker._read_labels(_textured_frame(), 1.0)
+    worker._read_labels(_textured_frame(), 1.2)
+    assert engine.reads == 1
+
+
+def test_labels_come_back_after_the_screen_closes():
+    script = [_menu(), _menu(), [], _menu(), _menu()]
+    worker, seen = _labels_worker(_FakeEngine(script=script))
+    for i in range(5):
+        worker._read_labels(_textured_frame(), 1.0 + 2 * i)
+    assert len(seen) == 2
+
+
+def test_no_labels_region_means_no_reads():
+    engine = _FakeEngine(_menu())
+    worker, _seen = _labels_worker(engine)
+    worker.cfg.ocr.regions_labels = Region()
+    worker._read_labels(_textured_frame(), 1.0)
+    assert engine.reads == 0
+
+
+def test_a_requested_scan_reads_the_whole_frame_once():
+    engine = _FakeEngine(_menu())
+    worker, _seen = _labels_worker(engine)
+    found = []
+    worker.screen_terms.connect(found.append)
+    worker._scan_if_requested(_textured_frame())
+    assert found == [] and engine.reads == 0            # nothing asked for
+    worker.request_scan()
+    worker._scan_if_requested(_textured_frame())
+    worker._scan_if_requested(_textured_frame())
+    assert [[t.text for t in batch] for batch in found] == [["Iron Sword", "Mega Potion"]]
+    assert found[0][0].source == "screen"

@@ -142,6 +142,8 @@ python -m grimoireassist --video samples\clip.mp4     REM test against a recorde
      promptly after a fight.
    - **`dialogue`** *(optional)* — the NPC / subtitle text box. Its prose is read as whole
      sentences and narrated aloud. See [Dialogue narration](#dialogue-narration).
+   - **`labels`** *(optional)* — a map or inventory area. Its labels (place and item names) are
+     listed as copyable terms, never spoken. See [Copyable terms](#copyable-terms).
    Click **Save** — regions are stored per game and applied live (no restart).
 4. **Import monster data** via **☰ → Import monster data…** — this populates the monster list used
    for fuzzy matching (without it there's nothing to match detections against) and the in-app
@@ -188,15 +190,18 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
     *Mid and up*, or *High only*. Lower-confidence detections are filtered out.
   - **Auto-start tracking on launch** — start OCR tracking automatically when the app opens
     instead of waiting for the **▶ Start** button. **Off by default.**
+  - **Text ▸** — text read off the screen.
+    - **Show dialogue log** — the running transcript strip above the monster cards (newest line
+      first, chevron folds it away), with the [copyable terms](#copyable-terms) chip strip.
+    - **Show test line box** — the **Test line** field inside that strip, for narrating typed text
+      without a capture source. **On by default**; turn it off to keep the strip to the transcript
+      alone (`ui.dialogue_test_box`).
+    - **Scan screen for terms (F8)** — read the whole current frame once for names, places and
+      items.
 - **Speech** — see [Dialogue narration](#dialogue-narration).
   - **Speak dialogue** — turn the whole dialogue pipeline on. **Off by default**; while off no
     dialogue OCR runs at all.
   - **Mute narration** — silence the voice while still detecting, logging and displaying the text.
-  - **Show dialogue log** — the running transcript strip above the monster cards (newest line
-    first, chevron folds it away).
-  - **Show test line box** — the **Test line** field inside that strip, for narrating typed text
-    without a capture source. **On by default**; turn it off to keep the strip to the transcript
-    alone (`ui.dialogue_test_box`).
   - **Voice source ▸** — *Automatic* (online, offline fallback), *Online neural voice*, or
     *Offline Windows voice*.
   - **Voice ▸** — the voices available from whichever source is active. Filled when you open the
@@ -371,7 +376,7 @@ Three ways to test narration with fixed input rather than a live capture card:
 | Want to | Do this |
 |---|---|
 | Hear a **line again** | Click it in the transcript, then **↻ Replay** (or just double-click it). |
-| Hear a **specific line** | **☰ → Speech → Show dialogue log**, type into **Test line** at the bottom of the strip, press Enter. Hide the box with **Show test line box** when you no longer want it. The text goes through the same cleaning a real read gets — paste in a line with its ▼ arrow and watch it drop out — then it is logged, displayed and spoken. Needs no capture source and no calibrated region. |
+| Hear a **specific line** | **☰ → OCR → Text → Show dialogue log**, type into **Test line** at the bottom of the strip, press Enter. Hide the box with **Show test line box** when you no longer want it. The text goes through the same cleaning a real read gets — paste in a line with its ▼ arrow and watch it drop out — then it is logged, displayed and spoken. Needs no capture source and no calibrated region. |
 | Check the **voice** only | **☰ → Speech → Test voice** — speaks one canned sentence. |
 | Exercise the **whole pipeline** (OCR included) | `python -m grimoireassist --video samples\clip.mp4` — runs against a recorded clip, so region calibration, statement settling and narration all work exactly as they would live. |
 
@@ -391,7 +396,7 @@ bar and left in the box so you can edit it, rather than being narrated as noise.
 
 ### The dialogue log
 
-**☰ → Speech → Show dialogue log** docks a running transcript **above** the monster cards, in
+**☰ → OCR → Text → Show dialogue log** docks a running transcript **above** the monster cards, in
 the tracking view's own colours. The **newest line sits at the top**, so the line just spoken is
 always against the top edge — glanceable mid-fight without chasing a scrollbar.
 
@@ -437,6 +442,40 @@ Mute is deliberately *not* the same switch as *Speak dialogue*:
 Muting also cuts the line currently being spoken rather than letting it finish. Statements are
 additionally written to the OCR debug log tagged `[dialogue · <source>]`, so you can see which
 voice actually spoke each line.
+
+## Copyable terms
+
+Names, places and items that OCR sees are **highlighted in the dialogue log** and collected in a
+**Terms** chip strip above it, newest first. **Click** a chip or a highlighted word to copy it to the
+clipboard, ready to paste into the Grimoire or a search engine. **Right-click** to search it in the
+browser drawer or your default browser. **All (N)** lists every term from this session.
+
+Where terms come from:
+
+- **Dialogue lines.** Every narrated line is searched. A box header or speaker label is a term too.
+- **The `labels` region** *(F9)*. Draw it over a map's place labels or an inventory list. It is
+  re-read whenever it changes, and a label is added once it has read the same twice in a row.
+  Counters are dropped ("Mega Potion x10" → "Mega Potion"). It works with narration off.
+  Hover a chip to see where it came from.
+- **Scan screen (F8)**, or the button in the dialogue header. Reads the whole current frame once, for a
+  menu or map where no `labels` region is drawn.
+
+How a term is recognised:
+
+- **Known names** get a colour by kind. Monsters come from the imported monster data. Locations, items
+  and characters come from an optional hand-written file, `games/<game id>/terms.json` (next to
+  `settings.json`):
+
+  ```json
+  {"locations": ["Kamura Village"], "items": ["Iron Sword"], "characters": ["Hinoa"]}
+  ```
+
+  OCR misreads close to a known name are copied with the list's spelling.
+- **Anything else capitalised like a name** mid-sentence ("Tower of Dawn", "Elder Fugen") is still
+  picked up, shown in grey. A sentence's capitalised first word only counts as part of a longer
+  name. Common opening verbs ("Ask", "Head", "Talk") and button hints never count.
+
+The chip strip lives in the dialogue log, so open it with **☰ → OCR → Text → Show dialogue log**.
 
 ## Detection behaviour
 

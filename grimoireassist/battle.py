@@ -20,8 +20,10 @@ import numpy as np
 from .config import Config, Region
 from .dialogue import (
     StatementReader, assemble_statement, in_reading_order, split_header,
+    statement_key,
 )
 from .ocr import OcrEngine, conf_level, level_floor
+from .terms import Lexicon, Term, label_terms
 
 
 class BattleState(Enum):
@@ -277,6 +279,20 @@ class BattleStateMachine:
             self.on_monsters_changed(self.confirmed_monsters())
 
 
+def scan_frame_terms(engine: OcrEngine, frame: np.ndarray,
+                     lexicon: Optional[Lexicon] = None) -> List[Term]:
+    """One-off read of the whole frame for copyable terms (the F8 scan).
+
+    For screens with no labels region drawn: a menu or map that is open for a
+    moment, read once on request rather than on every poll."""
+    if frame is None or frame.size == 0:
+        return []
+    lines = engine.read_lines(frame)
+    if lines and all(len(e) > 2 and e[2] is not None for e in lines):
+        lines = in_reading_order(lines)
+    return label_terms(lines, lexicon, source="screen")
+
+
 # --------------------------------------------------------------------------
 # Qt worker
 # --------------------------------------------------------------------------
@@ -293,6 +309,10 @@ try:
         # label it sat under ("" when there wasn't one). The header is shown in
         # the log but never spoken.
         dialogue_text = pyqtSignal(str, str)
+        # [Term] newly seen in the labels region (map / menu labels), and the
+        # result of a one-off whole-screen scan requested with `request_scan`.
+        labels_seen = pyqtSignal(list)
+        screen_terms = pyqtSignal(list)
         # [(x, y, w, h, matched)] in frame coords: every configured region with
         # matched=False (outline), plus a matched=True box per recognised text.
         region_status = pyqtSignal(list)
@@ -316,6 +336,13 @@ try:
             self._dlg_text = ""            # last text read from the dialogue region
             self._dlg_header = ""          # its box header / speaker label, if any
             self._dlg_boxes: list = []     # frame-coord boxes of the dialogue lines
+            self.lexicon: Optional[Lexicon] = None   # set by the UI per game
+            self._lbl_sig = None           # last labels-region fingerprint
+            self._lbl_ocr_t = 0.0
+            self._lbl_prev: set = set()    # label keys on the previous read
+            self._lbl_emitted: set = set() # label keys already sent for this screen
+            self._lbl_boxes: list = []     # frame-coord boxes of the label lines
+            self._scan_requested = False
             self.reader = StatementReader(
                 stable_frames=cfg.speech.stable_frames,
                 min_chars=cfg.speech.min_chars,
@@ -474,6 +501,62 @@ try:
                 self.debug_text.emit(f"[dialogue] {label}{statement}", [])
                 self.dialogue_text.emit(statement, self._dlg_header)
 
+        def _read_labels(self, frame: np.ndarray, now: float) -> None:
+            """OCR the labels region (a map or menu area) and emit new terms.
+
+            Unlike the dialogue region this one IS change-gated: map labels and
+            inventory lists don't type themselves out, so a still region means
+            the same labels, and the heartbeat catches a bad read. A label is
+            sent once it has read the same on two reads in a row — a screen
+            mid-transition reads as fragments that never repeat — and only once
+            per screen; an empty read (screen closed) lets them come back."""
+            region = self.cfg.ocr.regions_labels
+            if not region.is_set():
+                if self._lbl_boxes or self._lbl_prev:
+                    self._lbl_boxes, self._lbl_prev = [], set()
+                    self._lbl_emitted = set()
+                return
+            crop = self._crop(frame, region)
+            if crop is None:
+                return
+            g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+            sig = cv2.resize(g, (64, 32), interpolation=cv2.INTER_AREA).astype(np.int16)
+            changed = (self._lbl_sig is None or self._lbl_sig.shape != sig.shape
+                       or float(np.abs(sig - self._lbl_sig).mean()) >= self._CHANGE_THRESHOLD)
+            if not changed and (now - self._lbl_ocr_t) < self._HEARTBEAT_S:
+                return
+            self._lbl_sig, self._lbl_ocr_t = sig, now
+            lines = [] if float(g.std()) < self._BLANK_STDDEV else self.engine.read_lines(crop)
+            self._lbl_boxes = [(region.x + b[0], region.y + b[1], b[2], b[3])
+                               for _t, _c, b in lines if b is not None]
+            if lines and all(len(e) > 2 and e[2] is not None for e in lines):
+                lines = in_reading_order(lines)
+            found = label_terms(lines, self.lexicon, source="map/menu")
+            keys = {statement_key(t.text) for t in found}
+            if not found:
+                self._lbl_emitted = set()
+            fresh = [t for t in found
+                     if statement_key(t.text) in self._lbl_prev
+                     and statement_key(t.text) not in self._lbl_emitted]
+            self._lbl_prev = keys
+            if fresh:
+                self._lbl_emitted.update(statement_key(t.text) for t in fresh)
+                self.debug_text.emit(
+                    "[labels] " + "  |  ".join(t.text for t in fresh), [])
+                self.labels_seen.emit(fresh)
+
+        def request_scan(self) -> None:
+            """Read the whole next frame for terms (see `scan_frame_terms`).
+
+            Done on this thread so the engine is never used from two at once."""
+            self._scan_requested = True
+
+        def _scan_if_requested(self, frame: np.ndarray) -> None:
+            if not self._scan_requested:
+                return
+            self._scan_requested = False
+            self.screen_terms.emit(scan_frame_terms(self.engine, frame, self.lexicon))
+
         def run(self) -> None:
             interval = 1.0 / max(0.5, self.cfg.ocr.poll_fps)
             last_seq = -1
@@ -537,6 +620,8 @@ try:
                     self.tracker.expire(t0, end_detected)
                     self.tracker.emit_if_changed()
                     self._read_dialogue(frame, t0)
+                    self._read_labels(frame, t0)
+                    self._scan_if_requested(frame)
                     # Region overlay for the input preview; emit only on change.
                     # All configured regions as outlines + a box per matched text.
                     status = [(r.x, r.y, r.w, r.h, False)
@@ -558,6 +643,12 @@ try:
                                        dlg_region.w, dlg_region.h, False))
                         status.extend((x, y, w, h, True)
                                       for x, y, w, h in self._dlg_boxes)
+                    lbl_region = self.cfg.ocr.regions_labels
+                    if lbl_region.is_set():
+                        status.append((lbl_region.x, lbl_region.y,
+                                       lbl_region.w, lbl_region.h, False))
+                        status.extend((x, y, w, h, True)
+                                      for x, y, w, h in self._lbl_boxes)
                     status.extend((x, y, w, h, True)
                                   for x, y, w, h in self._match_boxes)
                     if status != self._last_status:
@@ -579,5 +670,21 @@ try:
                     # cycle is ~2×interval and other threads get CPU time.
                     time.sleep(interval)
 
+    class ScanThread(QThread):
+        """The F8 scan when tracking is off and there is no worker to ask."""
+        done = pyqtSignal(list)
+
+        def __init__(self, engine: OcrEngine, frame: np.ndarray,
+                     lexicon: Optional[Lexicon] = None, parent=None):
+            super().__init__(parent)
+            self.engine, self.frame, self.lexicon = engine, frame, lexicon
+
+        def run(self) -> None:
+            try:
+                self.done.emit(scan_frame_terms(self.engine, self.frame, self.lexicon))
+            except Exception:
+                self.done.emit([])
+
 except ImportError:  # PyQt not available (e.g. headless unit tests)
     OcrWorker = None  # type: ignore
+    ScanThread = None  # type: ignore

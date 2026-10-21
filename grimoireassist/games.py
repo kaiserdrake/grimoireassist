@@ -134,6 +134,32 @@ def monster_imported_data(game_id: str, config_path=None) -> dict:
         return {}
 
 
+def terms_file(game_id: str, config_path) -> Path:
+    """Return the user's term lists for a game: games/<id>/terms.json."""
+    return Path(config_path).parent / "games" / game_id / "terms.json"
+
+
+def load_terms(game_id: str, config_path=None) -> Dict[str, List[str]]:
+    """Return the user's known locations / items / characters for a game.
+
+    The file is optional and hand-written:
+    {"locations": [...], "items": [...], "characters": [...]}.
+    Missing or unreadable means no lists, never an error."""
+    if not config_path:
+        return {}
+    path = terms_file(game_id, config_path)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: [str(v) for v in data.get(k) or [] if str(v).strip()]
+            for k in ("locations", "items", "characters")}
+
+
 # ── Game settings file ─────────────────────────────────────────────────────────
 
 _DEFAULT_SETTINGS = {

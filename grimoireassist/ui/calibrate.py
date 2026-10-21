@@ -181,7 +181,8 @@ class CalibrateDialog(QDialog):
 
     Three kinds, picked from the dropdown: `monster_N` for names matched against
     the game's monster list, `battle_end` for the end-of-fight banner, and
-    `dialogue` for the text box whose prose is read aloud."""
+    `dialogue` for the text box whose prose is read aloud, and `labels` for a
+    map or menu area whose labels are listed as copyable terms."""
 
     def __init__(self, cfg: Config, frame_bgr: np.ndarray, parent=None) -> None:
         super().__init__(parent)
@@ -199,6 +200,8 @@ class CalibrateDialog(QDialog):
         regions["battle_end"] = Region(**vars(cfg.ocr.regions_battle_end))
         # optional dialogue region, read as whole sentences and narrated aloud
         regions["dialogue"] = Region(**vars(cfg.ocr.regions_dialogue))
+        # optional labels region (map / inventory), listed as copyable terms
+        regions["labels"] = Region(**vars(cfg.ocr.regions_labels))
         self.canvas.set_regions(regions)
 
         self.region_picker = QComboBox()
@@ -270,6 +273,7 @@ class CalibrateDialog(QDialog):
         self.cfg.ocr.regions_monster_names = slots or [Region()]
         self.cfg.ocr.regions_battle_end = regions.get("battle_end", Region())
         self.cfg.ocr.regions_dialogue = regions.get("dialogue", Region())
+        self.cfg.ocr.regions_labels = regions.get("labels", Region())
         self.cfg.ocr.keywords_battle_end = [
             s.strip() for s in self.end_text_edit.text().split(",") if s.strip()
         ]

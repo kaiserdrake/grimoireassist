@@ -15,9 +15,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # before any PyQt6 import
 import pytest
 from collections import deque
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QPushButton, QTextEdit, QWidget
 
 from grimoireassist.config import Config
+from grimoireassist.terms import Lexicon, TermLog
 from grimoireassist.ui.main_window import (
     _DIALOGUE_MAX_H, _DIALOGUE_MAX_LINES, _DIALOGUE_MIN_H, _DIALOGUE_ROWS,
     _DIALOGUE_SELECTED, _DIALOGUE_STAMP, MainWindow, _DialogueGrip,
@@ -44,6 +46,9 @@ class _LogWindow:
         self.spoken = []
         self.replay_btn = QPushButton()
         self._bar = _FakeStatusBar()
+        self._terms = TermLog()
+        self._dialogue_spans = {}
+        self._lexicon = Lexicon()
 
     def statusBar(self):
         return self._bar
@@ -61,6 +66,12 @@ class _LogWindow:
 
     def _render_dialogue_log(self):
         MainWindow._render_dialogue_log(self)
+
+    def _record_dialogue_terms(self, *args):
+        MainWindow._record_dialogue_terms(self, *args)
+
+    def _refresh_term_chips(self):
+        MainWindow._refresh_term_chips(self)
 
     def html(self):
         return self._dialogue_log.toHtml()
@@ -544,6 +555,7 @@ class _PlaceholderWindow:
         self._dialogue_log = QTextEdit()
         self._dialogue_entries = deque(maxlen=_DIALOGUE_MAX_LINES)
         self._dialogue_selected = None
+        self._dialogue_spans = {}
 
     def _dialogue_placeholder(self):
         return MainWindow._dialogue_placeholder(self)
@@ -791,9 +803,18 @@ def test_the_header_survives_a_real_signal_hop(app):
             self._dialogue_seq = 0
             self._dialogue_selected = None
             self.speaker = None
+            self._terms = TermLog()
+            self._dialogue_spans = {}
+            self._lexicon = Lexicon()
 
         def _log_line(self, text):
             pass
+
+        def _record_dialogue_terms(self, *args):
+            MainWindow._record_dialogue_terms(self, *args)
+
+        def _refresh_term_chips(self):
+            MainWindow._refresh_term_chips(self)
 
         def _render_dialogue_log(self):
             MainWindow._render_dialogue_log(self)
@@ -803,3 +824,66 @@ def test_the_header_survives_a_real_signal_hop(app):
     emitter.dialogue_text.emit("At sunset, I heard dogs barking.",
                                "Heart-to-Heart Info")
     assert receiver._dialogue_entries[0][2] == "Heart-to-Heart Info"
+
+
+# ------------------------------------------------------------ copyable terms
+def _term_window():
+    win = _LogWindow()
+    win._lexicon = Lexicon(monsters=["Rathalos"], locations=["Kamura Village"])
+    return win
+
+
+def test_a_known_name_in_a_line_becomes_a_term_link(app):
+    win = _term_window()
+    _say(win, "A Rathalos was seen near Kamura Village.")
+    html = win.html()
+    assert 'href="term:Rathalos"' in html
+    assert 'href="term:Kamura%20Village"' in html
+    # The words themselves are untouched: the line still reads as it was said.
+    assert win._dialogue_log.toPlainText().strip().endswith(
+        "A Rathalos was seen near Kamura Village.")
+
+
+def test_terms_from_lines_and_headers_reach_the_chip_list(app):
+    win = _term_window()
+    MainWindow._on_dialogue_text(win, "Meet me in Kamura Village.", "Elder Fugen")
+    assert [(t.text, t.kind) for t in win._terms.terms()] == [
+        ("Elder Fugen", "character"), ("Kamura Village", "location")]
+
+
+def test_clicking_a_term_copies_it(app):
+    win = _term_window()
+    MainWindow._copy_term(win, "Kamura Village")
+    assert QApplication.clipboard().text() == "Kamura Village"
+    assert win._bar.messages[-1] == 'Copied "Kamura Village"'
+
+
+def test_a_term_click_is_not_a_row_click(app):
+    """The highlighted name copies; the rest of the line still picks the row."""
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+    from grimoireassist.ui.main_window import _DialogueLog
+
+    log = _DialogueLog()
+    clicked, copied = [], []
+    log.entry_clicked.connect(clicked.append)
+    log.term_clicked.connect(copied.append)
+
+    def release(anchor):
+        log.anchorAt = lambda _pos: anchor
+        ev = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(1, 1), QPointF(1, 1),
+                         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                         Qt.KeyboardModifier.NoModifier)
+        log.mouseReleaseEvent(ev)
+
+    release("term:Kamura%20Village")
+    release("7")
+    assert copied == ["Kamura Village"]
+    assert clicked == [7]
+
+
+def test_spans_of_dropped_lines_are_forgotten(app):
+    win = _term_window()
+    for i in range(_DIALOGUE_MAX_LINES + 3):
+        _say(win, f"Line {i} in Kamura Village.")
+    assert len(win._dialogue_spans) == _DIALOGUE_MAX_LINES
