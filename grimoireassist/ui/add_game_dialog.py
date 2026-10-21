@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import unquote
 
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
@@ -9,6 +10,22 @@ from PyQt6.QtWidgets import (
 )
 
 from ..games import GameInfo, save_game, write_default_settings
+from .monster_panel import build_monster_url
+
+# (stored value, what the dropdown shows)
+_URL_STYLES = (
+    ("path", "Page per monster (path)"),
+    ("search", "Search (search)"),
+)
+_URL_PLACEHOLDERS = {
+    "path": "e.g. https://monsterbuddy.app/2/monsters/{name}",
+    "search": "e.g. https://example.com/notes?search={name}",
+}
+_URL_STYLE_HINTS = {
+    "path": "{name} becomes one monster's slug: Great Jagras → great-jagras.",
+    "search": "{name} becomes every monster on screen: anjanath || great jagras.",
+}
+_SAMPLE_NAMES = ["Great Jagras", "Anjanath"]
 
 
 class AddGameDialog(QDialog):
@@ -47,12 +64,35 @@ class AddGameDialog(QDialog):
         form.addRow("Display name:", self._name)
 
         self._url = QLineEdit()
-        self._url.setPlaceholderText("e.g. https://example.com/monsters/{name}")
+        self._url.setToolTip(
+            "The page opened for the monsters on screen. Put {name} where the\n"
+            "monster goes; the URL style below decides what replaces it.\n"
+            "With no {name}, the same page opens for every monster.\n\n"
+            "Examples:\n"
+            "  https://monsterbuddy.app/2/monsters/{name}\n"
+            "  https://grimoire.laeradsphere.com/game/236/258/notes?fileId=14&st1={name}")
+        self._url.textChanged.connect(self._update_url_hint)
         form.addRow("Site URL template:", self._url)
 
         self._url_style = QComboBox()
-        self._url_style.addItems(["path", "search"])
+        for style, label in _URL_STYLES:
+            self._url_style.addItem(label, style)
+        self._url_style.setToolTip(
+            "How {name} is filled in:\n\n"
+            "Page per monster (path) — one monster, as a URL slug:\n"
+            "  \"Great Jagras\" → great-jagras. If several are on screen, the\n"
+            "  first alphabetically is used. For wikis with a page per monster.\n\n"
+            "Search (search) — every monster on screen, lowercase, joined with\n"
+            "  \" || \": \"anjanath || rathalos\". For a notes page that filters\n"
+            "  by a search term, like the Grimoire's st1= parameter.")
+        self._url_style.currentIndexChanged.connect(self._update_url_hint)
         form.addRow("URL style:", self._url_style)
+
+        # What the two fields above produce, worked out live from sample names.
+        self._url_hint = QLabel()
+        self._url_hint.setStyleSheet("color:#8a8a99; font-size:11px;")
+        self._url_hint.setWordWrap(True)
+        form.addRow("", self._url_hint)
 
         self._notes_url = QLineEdit()
         self._notes_url.setPlaceholderText("Optional — secondary notes/grimoire URL")
@@ -85,6 +125,30 @@ class AddGameDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        self._update_url_hint()
+
+    def _update_url_hint(self) -> None:
+        """Placeholder and preview line follow the chosen style, so the two
+        fields explain each other."""
+        style = self._url_style.currentData()
+        self._url.setPlaceholderText(_URL_PLACEHOLDERS[style])
+        template = self._url.text().strip()
+        if not template:
+            self._url_hint.setText(_URL_STYLE_HINTS[style])
+            return
+        if "{name}" not in template:
+            self._url_hint.setText(
+                "No {name} in the template: the same page opens for every monster.")
+            return
+        try:
+            url = build_monster_url(template, _SAMPLE_NAMES, url_style=style)
+        except (IndexError, KeyError, ValueError):
+            self._url_hint.setText(
+                "Only {name} may appear in braces — other {…} breaks the template.")
+            return
+        # Shown decoded: the real URL is percent-encoded, which hides the point.
+        self._url_hint.setText(
+            f"With {' + '.join(_SAMPLE_NAMES)} on screen this opens:\n{unquote(url)}")
 
     def _on_accept(self) -> None:
         game_id = self._id.text().strip().lower()
@@ -108,7 +172,7 @@ class AddGameDialog(QDialog):
             id=game_id,
             name=name,
             site_url_template=url,
-            url_style=self._url_style.currentText(),
+            url_style=self._url_style.currentData(),
             notes_url=self._notes_url.text().strip(),
             requires_login=self._login.isChecked(),
             cards_per_row=self._cards_per_row.value(),

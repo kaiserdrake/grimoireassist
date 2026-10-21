@@ -1,13 +1,13 @@
-"""Region calibration dialog: draw / move / resize monster-name regions on a frozen frame."""
+"""Region calibration dialog: draw / move / resize the OCR regions on a frozen frame."""
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
-from PyQt6.QtCore import Qt, QRect, QPoint
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QVBoxLayout,
 )
 
@@ -15,8 +15,33 @@ from ..config import Config, Region
 
 _HANDLE = 9  # px hit radius for corner handles (widget space)
 
+# Region kinds with several numbered slots; keys are "<kind>_<n>". The others
+# (battle_end, dialogue) are a single slot keyed by the kind.
+MONSTER = "monster"
+LABELS = "labels"
+MAX_MONSTERS = 3
+MAX_LABELS = 4
+_SINGLE_NAMES = {"battle_end": "Battle end", "dialogue": "Dialogue"}
+_MULTI_NAMES = {MONSTER: "Monster", LABELS: "Labels"}
+
+
+def _kind(key: str) -> str:
+    """'monster_2' → 'monster'; single kinds are their own key."""
+    head, _, tail = key.rpartition("_")
+    return head if head in _MULTI_NAMES and tail.isdigit() else key
+
+
+def display_name(key: str) -> str:
+    """'monster_2' → 'Monster 2', 'battle_end' → 'Battle end'."""
+    kind = _kind(key)
+    if kind in _MULTI_NAMES:
+        return f"{_MULTI_NAMES[kind]} {key.rpartition('_')[2]}"
+    return _SINGLE_NAMES.get(key, key)
+
 
 class _Canvas(QLabel):
+    changed = pyqtSignal()  # a draw / move / resize gesture finished
+
     def __init__(self, frame_bgr: np.ndarray, parent=None) -> None:
         super().__init__(parent)
         h, w = frame_bgr.shape[:2]
@@ -148,8 +173,11 @@ class _Canvas(QLabel):
             region = self.regions.get(self._active_key)
             if region and (region.w < 5 or region.h < 5):
                 self.regions[self._active_key] = Region()  # discard tiny drags
+        gesture = self._mode is not None
         self._mode = self._corner = self._draw_start = None
         self.update()
+        if gesture:
+            self.changed.emit()
 
     # -- paint -----------------------------------------------------------
     def paintEvent(self, _e):
@@ -165,9 +193,11 @@ class _Canvas(QLabel):
             p.setPen(QColor("#ffd479") if active else QColor("#5a8cff"))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(r)
-            p.fillRect(QRect(r.x(), r.y() - 16, max(40, len(key) * 7), 16),
+            name = display_name(key)
+            tag_w = p.fontMetrics().horizontalAdvance(name) + 8
+            p.fillRect(QRect(r.x(), r.y() - 16, max(40, tag_w), 16),
                        QColor(0, 0, 0, 160))
-            p.drawText(r.x() + 3, r.y() - 4, key)
+            p.drawText(r.x() + 3, r.y() - 4, name)
             if active:  # draw resize handles
                 p.setBrush(QColor("#ffd479"))
                 for c in self._corners(r).values():
@@ -179,10 +209,12 @@ class CalibrateDialog(QDialog):
     """Define the OCR regions over a frozen frame (drag to draw, drag the body to
     move, drag a corner handle to resize).
 
-    Three kinds, picked from the dropdown: `monster_N` for names matched against
-    the game's monster list, `battle_end` for the end-of-fight banner, and
-    `dialogue` for the text box whose prose is read aloud, and `labels` for a
-    map or menu area whose labels are listed as copyable terms."""
+    The Region picker lists a fixed set of slots: `Monster 1-3` for names
+    matched against the game's monster list, `Battle end` for the end-of-fight
+    banner, `Dialogue` for the text box whose prose is read aloud, and
+    `Labels 1-4` for map or menu areas whose labels are listed as copyable
+    terms. Picking an unset slot and drawing on it adds that region; "Delete"
+    clears the selected slot. Only drawn slots are saved."""
 
     def __init__(self, cfg: Config, frame_bgr: np.ndarray, parent=None) -> None:
         super().__init__(parent)
@@ -191,29 +223,33 @@ class CalibrateDialog(QDialog):
         self.resize(1000, 640)
 
         self.canvas = _Canvas(frame_bgr)
+        self.canvas.changed.connect(self._refresh_picker)
+
+        # Every slot, in picker order. A config with more regions than there
+        # are slots keeps the first ones.
+        mons = [Region(**vars(r)) for r in cfg.ocr.regions_monster_names
+                if r.is_set()][:MAX_MONSTERS]
+        labels = [Region(**vars(r)) for r in cfg.ocr.regions_labels
+                  if r.is_set()][:MAX_LABELS]
         regions: dict[str, Region] = {}
-        for i, r in enumerate(cfg.ocr.regions_monster_names):
-            regions[f"monster_{i+1}"] = Region(**vars(r))
-        if not any(k.startswith("monster_") for k in regions):
-            regions["monster_1"] = Region()
-        # optional Battle-End trigger region (e.g. over the "Result" text)
+        for i in range(MAX_MONSTERS):
+            regions[f"{MONSTER}_{i + 1}"] = mons[i] if i < len(mons) else Region()
         regions["battle_end"] = Region(**vars(cfg.ocr.regions_battle_end))
-        # optional dialogue region, read as whole sentences and narrated aloud
         regions["dialogue"] = Region(**vars(cfg.ocr.regions_dialogue))
-        # optional labels region (map / inventory), listed as copyable terms
-        regions["labels"] = Region(**vars(cfg.ocr.regions_labels))
+        for i in range(MAX_LABELS):
+            regions[f"{LABELS}_{i + 1}"] = labels[i] if i < len(labels) else Region()
         self.canvas.set_regions(regions)
 
         self.region_picker = QComboBox()
-        self.region_picker.addItems(list(regions.keys()))
-        self.region_picker.currentTextChanged.connect(self.canvas.set_active)
-        self.canvas.set_active(self.region_picker.currentText())
+        self.region_picker.setMinimumWidth(170)
+        for key in regions:
+            self.region_picker.addItem(display_name(key), key)
+        self.region_picker.currentIndexChanged.connect(self._on_pick)
 
-        self.slot_count = QSpinBox()
-        self.slot_count.setMinimum(1)
-        self.slot_count.setMaximum(8)
-        self.slot_count.setValue(max(1, len(cfg.ocr.regions_monster_names)))
-        self.slot_count.valueChanged.connect(self._resize_slots)
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.setToolTip("Clear the selected region")
+        self.delete_btn.clicked.connect(self._delete)
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=self._delete)
 
         save_btn = QPushButton("Save to config")
         save_btn.clicked.connect(self._save)
@@ -223,13 +259,11 @@ class CalibrateDialog(QDialog):
         top = QHBoxLayout()
         top.addWidget(QLabel("Region:"))
         top.addWidget(self.region_picker)
-        top.addSpacing(16)
-        top.addWidget(QLabel("Monster regions:"))
-        top.addWidget(self.slot_count)
+        top.addWidget(self.delete_btn)
         top.addStretch(1)
-        top.addWidget(QLabel("drag to draw / move / resize"))
+        top.addWidget(QLabel("pick a region, then drag to draw / move / resize"))
 
-        # Battle-End trigger: the region (drawn above as 'battle_end') + the text to match.
+        # Battle-End trigger: the region (drawn above as 'Battle end') + the text to match.
         end_row = QHBoxLayout()
         end_row.addWidget(QLabel("Battle-End text (comma-separated):"))
         self.end_text_edit = QLineEdit(", ".join(cfg.ocr.keywords_battle_end))
@@ -247,33 +281,46 @@ class CalibrateDialog(QDialog):
         layout.addWidget(self.canvas, 1)
         layout.addLayout(bottom)
 
-    def _resize_slots(self, n: int) -> None:
-        regions = dict(self.canvas.regions)
-        for key in [k for k in regions if k.startswith("monster_")]:
-            regions.pop(key)
-        for i in range(n):
-            regions[f"monster_{i+1}"] = Region()
-        # keep existing geometry where we can
-        existing = [v for k, v in sorted(self.canvas.regions.items())
-                    if k.startswith("monster_")]
-        for i, r in enumerate(existing[:n]):
-            regions[f"monster_{i+1}"] = r
-        self.canvas.set_regions(regions)
-        self.region_picker.clear()
-        self.region_picker.addItems([k for k in regions])
+        self._refresh_picker()
+
+    # ---- the slot list ---------------------------------------------------
+    def current_key(self) -> Optional[str]:
+        return self.region_picker.currentData()
+
+    def _refresh_picker(self) -> None:
+        """Mark unset slots and sync the active slot and Delete button. The
+        canvas swaps in a fresh Region on each draw, so read it from there."""
+        for i in range(self.region_picker.count()):
+            key = self.region_picker.itemData(i)
+            region = self.canvas.regions.get(key, Region())
+            self.region_picker.setItemText(
+                i, display_name(key) + ("" if region.is_set() else " — not set"))
+        self._on_pick()
+
+    def _on_pick(self, *_args) -> None:
+        key = self.current_key()
+        if key:
+            self.canvas.set_active(key)
+        region = self.canvas.regions.get(key) if key else None
+        self.delete_btn.setEnabled(region is not None and region.is_set())
+
+    def _delete(self) -> None:
+        key = self.current_key()
+        if not key or not self.delete_btn.isEnabled():
+            return
+        self.canvas.regions[key] = Region()
+        self.canvas.update()
+        self._refresh_picker()
 
     def _save(self) -> None:
-        regions = self.canvas.regions
-        slots: List[Region] = []
-        i = 1
-        while f"monster_{i}" in regions:
-            slots.append(regions[f"monster_{i}"])
-            i += 1
+        r = self.canvas.regions
+        mons = [v for k, v in r.items() if _kind(k) == MONSTER and v.is_set()]
+        labels = [v for k, v in r.items() if _kind(k) == LABELS and v.is_set()]
         # update the active regions; the caller persists them under the current game
-        self.cfg.ocr.regions_monster_names = slots or [Region()]
-        self.cfg.ocr.regions_battle_end = regions.get("battle_end", Region())
-        self.cfg.ocr.regions_dialogue = regions.get("dialogue", Region())
-        self.cfg.ocr.regions_labels = regions.get("labels", Region())
+        self.cfg.ocr.regions_monster_names = mons or [Region()]
+        self.cfg.ocr.regions_battle_end = r.get("battle_end", Region())
+        self.cfg.ocr.regions_dialogue = r.get("dialogue", Region())
+        self.cfg.ocr.regions_labels = labels
         self.cfg.ocr.keywords_battle_end = [
             s.strip() for s in self.end_text_edit.text().split(",") if s.strip()
         ]

@@ -21,7 +21,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QTextEdit, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QStackedWidget, QTextEdit, QToolBar, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .. import __version__
@@ -45,8 +46,11 @@ from .calibrate import CalibrateDialog
 from .game_select import GameSelectDialog
 from .import_wizard import ImportWizard
 from .controller_overlay import ControllerMapOverlay
+from .flow_layout import FlowLayout
 from .controllers import LAYOUTS, LAYOUT_ORDER
 from .monster_panel import MonsterNav, MonsterPanel
+from . import pane_layout
+from .pane_layout import BROWSER, CLASSIC, GRIMOIRE, TRACKING
 from .slide_toggle import AutoSwitchToggle
 from .preview import InputPreview
 from .review import ReviewOverlay
@@ -77,7 +81,7 @@ _TERM_COLOURS = {
     "term":      ("#2e2e3c", "#c8c8d8"),
 }
 _TERM_HREF = "term:"
-_TERM_CHIPS_SHOWN = 12     # the rest are one click away under "All"
+_TERM_CHIPS_SHOWN = 30     # the column scrolls; the rest are under "All"
 _TERM_CHIP_CHARS = 28
 
 
@@ -275,34 +279,66 @@ class MainWindow(QMainWindow):
         self._scan_thread = None
         # What the user asked for, which is not the same as what is on screen:
         # the strip belongs to the tracking view and stays hidden on the Grimoire.
-        self._dialogue_wanted = False
+        self._dialogue_wanted = cfg.ui.show_dialogue_log
         self._dialogue_widget = self._build_dialogue_panel()
         self._dialogue_widget.setVisible(False)
+        # The menu item was built unchecked, before the strip existed; point it
+        # at the stored state without re-entering its slot (_start_game applies it).
+        self.act_dialogue_log.blockSignals(True)
+        self.act_dialogue_log.setChecked(self._dialogue_wanted)
+        self.act_dialogue_log.blockSignals(False)
 
-        # Permanent central splitter: [main view host | browser drawer].
-        # _start_game only swaps the child of _main_host, so the browser
-        # (and its tabs) survives game switches.
-        self._main_host = QWidget()
-        _host_lay = QVBoxLayout(self._main_host)
+        # Three sections, two panes. Each section has a host that never
+        # changes; a layout (see pane_layout) only moves the hosts between the
+        # left and the right pane. _start_game only swaps the child of
+        # _tracking_host, so the browser (and its tabs) survives game switches.
+        self._tracking_host = QWidget()
+        _host_lay = QVBoxLayout(self._tracking_host)
         _host_lay.setContentsMargins(0, 0, 0, 0)
         _host_lay.setSpacing(0)
+        # The Grimoire's own pane, for the layouts that show it beside the
+        # tracking view. Everywhere else its web view lives inside the tracking
+        # panel and swaps with the cards, as it always has.
+        self._grimoire_host = QWidget()
+        _gr_lay = QVBoxLayout(self._grimoire_host)
+        _gr_lay.setContentsMargins(0, 0, 0, 0)
+        _gr_lay.setSpacing(0)
         self.browser = BrowserPanel(cfg=cfg)
-        self.browser.setVisible(False)   # drawer starts closed
         # Prime the bookmark list; the drawer re-syncs it on its own whenever a
         # bookmarks page is shown, since the focus README follows Grimoire.
         self.browser.refresh_bookmarks_source()
         self.browser.status_message.connect(
             lambda msg: self.statusBar().showMessage(msg, 4000))
+        # The left pane is on screen in every layout, which makes it the
+        # "main pane": the PiP and the review screen float over it.
+        self._left_stack = QStackedWidget()
+        self._main_host = QWidget()
+        _main_lay = QVBoxLayout(self._main_host)
+        _main_lay.setContentsMargins(0, 0, 0, 0)
+        _main_lay.setSpacing(0)
+        _main_lay.addWidget(self._left_stack)
+        # The right pane: the browser drawer (classic) or whichever of the two
+        # swapping sections is up. Starts closed; _apply_pane_layout opens it.
+        self._right_stack = QStackedWidget()
+        self._right_stack.setVisible(False)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.addWidget(self._main_host)
-        self._splitter.addWidget(self.browser)
+        self._splitter.addWidget(self._right_stack)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-        # main-pane share of the splitter; updated when the drawer closes so
-        # a user-dragged ratio survives toggling the browser off and on.
-        # Loaded from config (saved on exit) so it also survives restarts.
-        self._main_ratio = min(max(cfg.ui.browser_split_ratio, 0.1), 0.9)
+        # Left-pane share of the splitter, per layout; noted whenever the right
+        # pane closes or the layout changes, so a user-dragged ratio survives
+        # both. Loaded from config (saved on exit) so it also survives restarts.
+        self._pane_layout = pane_layout.normalize(cfg.ui.pane_layout)
+        self._split_ratios: Dict[str, float] = dict(cfg.ui.pane_split_ratios)
+        self._split_ratios[CLASSIC] = min(max(cfg.ui.browser_split_ratio, 0.1), 0.9)
+        # Is the browser up: the drawer open (classic), or holding the right
+        # pane where it swaps. Always true where it is pinned.
+        self._browser_shown = not pane_layout.browser_toggles(self._pane_layout)
+        self._browser_on_screen = False     # as of the last _apply_pane_layout
+        self._right_on_screen = False
+        self._applied_layout: Optional[str] = None
         self._splitter.setStyleSheet(
             "QSplitter::handle { background:#2a2a36; }")
         # The splitter sits inside a plain container so window-wide floating
@@ -375,6 +411,7 @@ class MainWindow(QMainWindow):
         # load the selected game (panel + worker)
         game = get_game(cfg.selected_game, cfg._path) or default_game(cfg._path)
         self._start_game(game)
+        self._apply_pane_layout()
 
         if cfg.ui.always_on_top:
             self._apply_on_top(True)
@@ -461,6 +498,10 @@ class MainWindow(QMainWindow):
         wlay.addWidget(self.panel, 1)
         wlay.addWidget(self._debug_widget)
         self._set_main_widget(wrapper)
+        # The new panel brought its own Grimoire view; lend it out if the
+        # layout gives the Grimoire a pane of its own.
+        self._place_grimoire_view()
+        self.panel.set_grimoire_visible(self._grimoire_shown)
         # The wrapper is rebuilt per game, so re-assert the strip's visibility
         # rather than relying on it surviving the re-parent.
         self._apply_dialogue_visibility()
@@ -475,10 +516,10 @@ class MainWindow(QMainWindow):
             self._stop_worker()
 
     def _set_main_widget(self, w: QWidget) -> None:
-        """Swap the left (main view) pane of the splitter. The new wrapper has
-        already re-parented _debug_widget into itself, so deleting the old
-        wrapper is safe."""
-        lay = self._main_host.layout()
+        """Swap the tracking section's content. The new wrapper has already
+        re-parented _debug_widget into itself, so deleting the old wrapper is
+        safe."""
+        lay = self._tracking_host.layout()
         while lay.count():
             old = lay.takeAt(0).widget()
             if old is not None:
@@ -493,39 +534,174 @@ class MainWindow(QMainWindow):
         if getattr(self, "_review", None) is not None:
             self._review.raise_()
 
-    # ================= browser drawer =================
-    def _toggle_browser(self) -> None:
-        self._set_browser_open(not self.browser.isVisible())
+    # ================= pane layout =================
+    def _section_host(self, section: Optional[str]) -> Optional[QWidget]:
+        """The widget that puts `section` on screen. Where the Grimoire swaps
+        with the cards it is inside the tracking panel, so it shares that host."""
+        if section is None:
+            return None
+        if section == GRIMOIRE and not pane_layout.grimoire_detached(self._pane_layout):
+            return self._tracking_host
+        return {TRACKING: self._tracking_host, GRIMOIRE: self._grimoire_host,
+                BROWSER: self.browser}[section]
 
-    def _set_browser_open(self, open_: bool) -> None:
-        if open_:
-            self.browser.ensure_ready()
-            self.browser.setVisible(True)
-            # restore the last user-chosen split (50/50 by default)
-            total = max(self._splitter.width(), 1)
-            main_w = round(total * self._main_ratio)
-            self._splitter.setSizes([main_w, total - main_w])
-            self.browser.focus_url_bar()
-            # The controller map floats over the whole central area, drawer
-            # included, so keep it on top of the newly shown web view.
-            if getattr(self, "_ctrl_map", None) is not None:
-                self._ctrl_map.raise_()
-            # Bookmarks track the Grimoire focus game, so re-read them whenever
-            # the drawer comes back into view (throttled inside the panel).
-            self.browser.sync_bookmarks(force=False)
-        else:
-            sizes = self._splitter.sizes()
-            if sizes[1] > 0:
-                self._main_ratio = sizes[0] / (sizes[0] + sizes[1])
-            # Drop focus held inside the drawer before hiding it. Hiding the
+    def _place_grimoire_view(self) -> None:
+        """Put the panel's Grimoire view where the layout wants it: in the
+        tracking panel's stack, or in _grimoire_host as a pane of its own.
+        Also clears out a view left behind by the previous game's panel."""
+        lay = self._grimoire_host.layout()
+        view = self.panel.grimoire_view() if self.panel is not None else None
+        for i in reversed(range(lay.count())):
+            old = lay.itemAt(i).widget()
+            if old is not None and old is not view:
+                lay.takeAt(i)
+                old.deleteLater()
+        if self.panel is None:
+            return
+        if pane_layout.grimoire_detached(self._pane_layout):
+            view = self.panel.detach_grimoire()
+            if view is None:
+                view = QLabel("PyQt6-WebEngine not installed — cannot embed page.")
+                view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                view.setStyleSheet("color:#c66;")
+            if lay.indexOf(view) < 0:
+                lay.addWidget(view)
+            # The panel's stack hid it explicitly as a non-current page, and a
+            # layout never shows an explicitly hidden widget on its own.
+            view.setVisible(True)
+        elif self.panel.is_grimoire_detached():
+            if view is not None:
+                lay.removeWidget(view)
+            self.panel.attach_grimoire()
+
+    def _apply_pane_layout(self) -> None:
+        """Put each section's host in its pane and bring the right ones up, for
+        the current layout and view state. Idempotent: every layout switch and
+        browser toggle ends here."""
+        layout = self._pane_layout
+        left, right = pane_layout.placement(
+            layout, self._grimoire_shown, self._browser_shown)
+        left_w = self._section_host(left)
+        right_w = self._section_host(right)
+        layout_changed = layout != self._applied_layout
+        # Note a dragged split before the right pane goes or the layout changes.
+        if self._right_on_screen and (right_w is None or layout_changed):
+            self._remember_split(self._applied_layout)
+
+        browser_up = BROWSER in (left, right)
+        if self._browser_on_screen and not browser_up:
+            # Drop focus held inside the browser before hiding it. Hiding the
             # focused widget makes Qt tab-focus the next widget — the grimoire
             # web view — and Chromium renders tab-focus as a focus ring around
             # the page (the white "selection" box).
             fw = QApplication.focusWidget()
             if fw is not None and self.browser.isAncestorOf(fw):
                 fw.clearFocus()
-            self.browser.setVisible(False)  # main pane auto-fills 100%
-        self.browser_btn.setChecked(open_)
+        if browser_up:
+            self.browser.ensure_ready()
+
+        # The left pane holds just its section; every other host waits in the
+        # right pane's stack, where only the current page is shown.
+        for host in (self._tracking_host, self._grimoire_host, self.browser):
+            target = self._left_stack if host is left_w else self._right_stack
+            other = self._right_stack if target is self._left_stack else self._left_stack
+            if target.indexOf(host) < 0:
+                other.removeWidget(host)
+                target.addWidget(host)
+        self._left_stack.setCurrentWidget(left_w)
+        if right_w is not None:
+            self._right_stack.setCurrentWidget(right_w)
+        self._right_stack.setVisible(right_w is not None)
+
+        if right_w is not None and (layout_changed or not self._right_on_screen):
+            self._apply_split()
+        if browser_up and not self._browser_on_screen:
+            # Bookmarks track the Grimoire focus game, so re-read them whenever
+            # the browser comes back into view (throttled inside the panel).
+            self.browser.sync_bookmarks(force=False)
+        self._browser_on_screen = browser_up
+        self._right_on_screen = right_w is not None
+        self._applied_layout = layout
+        # The left pane's content changed under the floating children (PiP,
+        # review screen); _sync_overlays raises the rest.
+        if getattr(self, "_review", None) is not None:
+            self._review.raise_()
+        self._sync_preview_inset()
+
+    def _remember_split(self, layout: Optional[str]) -> None:
+        """Keep the left pane's current share for `layout`, if both are up."""
+        if layout is None or not self._splitter.isVisible():
+            return
+        sizes = self._splitter.sizes()
+        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+            self._split_ratios[layout] = sizes[0] / (sizes[0] + sizes[1])
+
+    def _apply_split(self) -> None:
+        """Size the panes to the layout's remembered share (50/50 by default)."""
+        ratio = min(max(self._split_ratios.get(self._pane_layout, 0.5), 0.1), 0.9)
+        total = max(self._splitter.width(), 1)
+        left_w = round(total * ratio)
+        self._splitter.setSizes([left_w, total - left_w])
+
+    def _set_pane_layout(self, layout: str) -> None:
+        """Menu entry: pin a section to the left (or go back to classic). Live."""
+        layout = pane_layout.normalize(layout)
+        if layout != self._pane_layout:
+            self._cancel_idle()
+            self._pane_layout = layout
+            self.cfg.ui.pane_layout = layout
+            if pane_layout.grimoire_detached(layout):
+                self._grimoire_shown = False    # it has a pane of its own now
+            # A browser that was up stays up; a pinned one is always up.
+            self._browser_shown = (self._browser_shown
+                                   or not pane_layout.browser_toggles(layout))
+            self._place_grimoire_view()
+            self._apply_pane_layout()
+            self._save_split_ratios()
+            self.cfg.save()
+            if self._auto_switch and not self._detections:
+                self._start_idle()
+        self._sync_layout_actions()
+        self._set_grimoire(self._grimoire_shown)    # panel, strip, buttons, overlays
+
+    def _save_split_ratios(self) -> None:
+        """Copy the in-memory split shares into config (the caller saves)."""
+        self.cfg.ui.browser_split_ratio = self._split_ratios.get(
+            CLASSIC, self.cfg.ui.browser_split_ratio)
+        self.cfg.ui.pane_split_ratios = {
+            k: v for k, v in self._split_ratios.items() if k != CLASSIC}
+
+    def _sync_layout_actions(self) -> None:
+        for key, act in getattr(self, "_layout_actions", {}).items():
+            act.setChecked(key == self._pane_layout)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Sizes set before the first show are against a splitter that has not
+        # been laid out yet; redo them once it has its real width.
+        if not getattr(self, "_split_shown", False):
+            self._split_shown = True
+            if self._right_on_screen:
+                QTimer.singleShot(0, self._apply_split)
+
+    # ================= browser =================
+    def _toggle_browser(self) -> None:
+        if pane_layout.browser_toggles(self._pane_layout):
+            self._set_browser_open(not self._browser_shown)
+
+    def _set_browser_open(self, open_: bool) -> None:
+        """Open/close the drawer (classic), or swap the browser in/out of the
+        right pane. A pinned browser is always open."""
+        if not pane_layout.browser_toggles(self._pane_layout):
+            open_ = True
+        self._browser_shown = bool(open_)
+        self._apply_pane_layout()
+        if open_:
+            self.browser.focus_url_bar()
+        self._update_view_buttons()
+        # The controller map floats over the whole central area, browser
+        # included, so keep it on top of a newly shown web view.
+        self._sync_overlays()
 
     def _start_worker(self) -> None:
         if self.worker is not None:
@@ -569,6 +745,8 @@ class MainWindow(QMainWindow):
         dialogue = self.cfg.ocr.regions_dialogue
         if dialogue.is_set():
             rects.append((dialogue.x, dialogue.y, dialogue.w, dialogue.h, False))
+        rects.extend((r.x, r.y, r.w, r.h, False)
+                     for r in self.cfg.ocr.regions_labels if r.is_set())
         self._preview.set_region_status(rects)
 
     def _toggle_tracking(self) -> None:
@@ -917,6 +1095,20 @@ class MainWindow(QMainWindow):
         self.act_fullscreen = menu_window.addAction("Fullscreen\tF11")
         self.act_fullscreen.setCheckable(True)
         self.act_fullscreen.triggered.connect(self._toggle_fullscreen)
+        # Which section is pinned to the left; the other two swap on the right.
+        layout_menu = menu_window.addMenu("Layout")
+        layout_group = QActionGroup(layout_menu)
+        layout_group.setExclusive(True)
+        self._layout_actions: Dict[str, QAction] = {}
+        current_layout = pane_layout.normalize(self.cfg.ui.pane_layout)
+        for key in pane_layout.LAYOUTS:
+            act = QAction(pane_layout.LAYOUT_LABELS[key], layout_menu)
+            act.setCheckable(True)
+            act.setChecked(current_layout == key)
+            act.triggered.connect(lambda _c, k=key: self._set_pane_layout(k))
+            layout_group.addAction(act)
+            layout_menu.addAction(act)
+            self._layout_actions[key] = act
 
         # ── Overlays ─────────────────────────────────────────────
         # The two things that float over the main pane, and whether they do it
@@ -1009,8 +1201,7 @@ class MainWindow(QMainWindow):
         self.grimoire_btn.setCheckable(True)
         self.grimoire_btn.setStyleSheet(_VIEW_BTN_CSS)
         self.grimoire_btn.clicked.connect(self._toggle_grimoire_view)
-        self._update_grimoire_btn()
-        tb.addWidget(self.grimoire_btn)
+        self._grimoire_btn_act = tb.addWidget(self.grimoire_btn)
 
         # Browser drawer toggle.
         self.browser_btn = QToolButton()
@@ -1019,7 +1210,8 @@ class MainWindow(QMainWindow):
         self.browser_btn.setToolTip("Toggle browser (Ctrl+B)")
         self.browser_btn.setStyleSheet(_VIEW_BTN_CSS)
         self.browser_btn.clicked.connect(self._toggle_browser)
-        tb.addWidget(self.browser_btn)
+        self._browser_btn_act = tb.addWidget(self.browser_btn)
+        self._update_view_buttons()
         # The controller map has no toolbar control of its own: it is a
         # set-and-forget overlay, and it lives under Overlays in the menu.
 
@@ -1336,8 +1528,6 @@ class MainWindow(QMainWindow):
         blay.setContentsMargins(0, 0, 0, 0)
         blay.setSpacing(4)
 
-        blay.addWidget(self._build_term_strip())
-
         # Rich text, not plain: each entry carries its own banding and a
         # timestamp styled apart from the prose it belongs to.
         self._dialogue_log = _DialogueLog()
@@ -1355,7 +1545,17 @@ class MainWindow(QMainWindow):
         self._dialogue_log.term_clicked.connect(self._copy_term)
         self._dialogue_log.term_menu.connect(self._show_term_menu)
         clear_btn.clicked.connect(self._clear_dialogue_log)
-        blay.addWidget(self._dialogue_log)
+
+        # Two columns: the transcript on the left, the terms found in it on
+        # the right. The log's fixed height sets the row; the terms column
+        # fills it and scrolls, so the grip resizes both together.
+        columns = QWidget()
+        clay = QHBoxLayout(columns)
+        clay.setContentsMargins(0, 0, 0, 0)
+        clay.setSpacing(10)
+        clay.addWidget(self._dialogue_log, 3)
+        clay.addWidget(self._build_term_column(), 2)
+        blay.addWidget(columns)
 
         # ── Type a line and hear it ─────────────────────────────────────
         # The counterpart to the debug panel's "Test OCR" box: narration can be
@@ -1730,33 +1930,21 @@ class MainWindow(QMainWindow):
         self._terms.extend(terms)
         self._refresh_term_chips()
 
-    def _build_term_strip(self) -> QWidget:
-        """The chip strip: recent terms, newest first, click to copy.
-
-        One row, clipped rather than wrapped, so it never pushes the transcript
-        down; "All" lists everything the row has no room for."""
-        strip = QWidget()
-        lay = QHBoxLayout(strip)
+    def _build_term_column(self) -> QWidget:
+        """The terms column beside the transcript: recent terms, newest first,
+        as chips that wrap onto new rows and scroll; click to copy. "All"
+        lists everything past the chips shown."""
+        col = QWidget()
+        lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel("Terms")
-        lbl.setStyleSheet("color:#7f7f93; font-size:11px;")
-        lay.addWidget(lbl)
-
-        host = QWidget()
-        self._term_chips_lay = QHBoxLayout(host)
-        self._term_chips_lay.setContentsMargins(0, 0, 0, 0)
-        self._term_chips_lay.setSpacing(5)
-        self._term_chips_lay.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidget(host)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFixedHeight(38)
-        lay.addWidget(scroll, 1)
-
+        lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:bold;")
+        head.addWidget(lbl)
+        head.addStretch()
         self._term_all_btn = QPushButton("All")
         self._term_all_btn.setStyleSheet(
             "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
@@ -1764,28 +1952,45 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#3a3a50; }")
         self._term_all_btn.setToolTip("Every term seen this session")
         self._term_all_btn.clicked.connect(self._show_all_terms)
-        lay.addWidget(self._term_all_btn)
+        self._term_all_btn.setVisible(False)
+        head.addWidget(self._term_all_btn)
+        lay.addLayout(head)
 
-        self._term_strip = strip
-        strip.setVisible(False)          # shown once there is something in it
-        return strip
+        host = QWidget()
+        self._term_chips_lay = FlowLayout(host, spacing=5)
+        self._term_placeholder = QLabel("Names, places and items show up here")
+        self._term_placeholder.setStyleSheet("color:#5a5a6a; font-size:11px;")
+        self._term_chips_lay.addWidget(self._term_placeholder)
+        scroll = QScrollArea()
+        scroll.setWidget(host)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Never taller than the transcript beside it: the log sets the height.
+        scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        lay.addWidget(scroll, 1)
+        return col
 
     def _refresh_term_chips(self) -> None:
         lay = getattr(self, "_term_chips_lay", None)
         if lay is None:
             return
-        while lay.count() > 1:           # keep the trailing stretch
+        while lay.count():
             item = lay.takeAt(0)
-            if item.widget() is not None:
+            widget = item.widget()
+            if widget is not None and widget is not self._term_placeholder:
                 # Detach now: deleteLater alone leaves the old chip painted
                 # under the new ones until the event loop gets to it.
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+                widget.setParent(None)
+                widget.deleteLater()
         terms = self._terms.terms()
-        for i, term in enumerate(terms[:_TERM_CHIPS_SHOWN]):
-            lay.insertWidget(i, self._term_chip(term))
+        for term in terms[:_TERM_CHIPS_SHOWN]:
+            lay.addWidget(self._term_chip(term))
+        if not terms:
+            lay.addWidget(self._term_placeholder)
+        self._term_placeholder.setVisible(not terms)
         self._term_all_btn.setText(f"All ({len(terms)})")
-        self._term_strip.setVisible(bool(terms))
+        self._term_all_btn.setVisible(bool(terms))
 
     def _term_chip(self, term: Term) -> QPushButton:
         bg, fg = _TERM_COLOURS.get(term.kind, _TERM_COLOURS["term"])
@@ -1797,7 +2002,7 @@ class MainWindow(QMainWindow):
         # rounded chip, so hover lightens the fill instead.
         chip.setStyleSheet(
             "QPushButton { background:%s; color:%s; border:none; border-radius:12px;"
-            " padding:4px 12px; font-size:15px; }"
+            " padding:4px 12px; font-size:15px; font-weight:bold; }"
             "QPushButton:hover { background:%s; }"
             % (bg, fg, QColor(bg).lighter(150).name()))
         chip.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2058,6 +2263,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_dialogue_panel(self, visible: bool) -> None:
         self._dialogue_wanted = bool(visible)
+        self.cfg.ui.show_dialogue_log = self._dialogue_wanted
+        self.cfg.save()
         self._apply_dialogue_visibility()
 
     def _apply_dialogue_visibility(self) -> None:
@@ -2105,8 +2312,12 @@ class MainWindow(QMainWindow):
 
         Only the debug panel counts: the dialogue strip sits at the top of the
         pane, nowhere near the bottom-left preview."""
+        # The PiP floats over the left pane; the debug panel only crowds it
+        # when the tracking view is the one there.
+        left = getattr(self, "_left_stack", None)
+        tracking_left = left is None or left.currentWidget() is self._tracking_host
         inset = (self._debug_widget.sizeHint().height()
-                 if self._debug_widget.isVisible() else 0)
+                 if self._debug_widget.isVisible() and tracking_left else 0)
         self._preview.set_bottom_inset(inset)
 
     # ================= ocr engine =================
@@ -2187,7 +2398,16 @@ class MainWindow(QMainWindow):
             self._cancel_idle()
 
     def _toggle_grimoire_view(self) -> None:
-        """Manually show/hide the Grimoire view. Independent of Auto Switch."""
+        """Manually show/hide the Grimoire view. Independent of Auto Switch.
+
+        Where the Grimoire swaps with the browser (tracking pinned left) the
+        button swaps those two instead; where it is pinned there is nothing
+        to toggle and the button is hidden."""
+        if pane_layout.swap_pair(self._pane_layout) == (GRIMOIRE, BROWSER):
+            self._set_browser_open(not self._browser_shown)
+            return
+        if not pane_layout.grimoire_toggles(self._pane_layout):
+            return
         self._cancel_idle()
         self._set_grimoire(not self._grimoire_shown)
 
@@ -2297,6 +2517,10 @@ class MainWindow(QMainWindow):
         return max(1, int(getattr(self.cfg.ui, "idle_switch_s", 60)))
 
     def _start_idle(self) -> None:
+        # The countdown ends in a switch to the Grimoire, which only means
+        # something where tracking and Grimoire share a pane.
+        if not pane_layout.auto_switch_applies(self._pane_layout):
+            return
         if not self._idle_timer.isActive():
             self._idle_secs = 0
             self._idle_timer.start()
@@ -2325,17 +2549,39 @@ class MainWindow(QMainWindow):
             self.panel.set_countdown(remaining)
 
     def _set_grimoire(self, visible: bool) -> None:
+        # With a pane of its own the Grimoire never covers the tracking view.
+        if pane_layout.grimoire_detached(self._pane_layout):
+            visible = False
         self._grimoire_shown = visible
         if self.panel:
             self.panel.set_grimoire_visible(visible)
         self._apply_dialogue_visibility()
-        self._update_grimoire_btn()
+        self._update_view_buttons()
         self._sync_overlays()
+
+    def _update_view_buttons(self) -> None:
+        self._update_grimoire_btn()
+        self._update_browser_btn()
 
     def _update_grimoire_btn(self) -> None:
         """Reflect the current view in the manual view button: the icon shows
         where you are, the tooltip says where a click takes you."""
-        if not hasattr(self, "grimoire_btn"):
+        if not hasattr(self, "grimoire_btn") or not hasattr(self, "_pane_layout"):
+            return
+        layout = self._pane_layout
+        self._grimoire_btn_act.setVisible(pane_layout.grimoire_toggles(layout))
+        if pane_layout.swap_pair(layout) == (GRIMOIRE, BROWSER):
+            # Swaps the right pane between the Grimoire and the browser.
+            shown = not self._browser_shown
+            self.grimoire_btn.setChecked(shown)
+            if shown:
+                self.grimoire_btn.setText("📖")
+                self.grimoire_btn.setToolTip(
+                    "Grimoire on the right — click for the browser")
+            else:
+                self.grimoire_btn.setText("📕")
+                self.grimoire_btn.setToolTip(
+                    "Browser on the right — click for the Grimoire")
             return
         self.grimoire_btn.setChecked(self._grimoire_shown)
         if self._grimoire_shown:
@@ -2344,6 +2590,21 @@ class MainWindow(QMainWindow):
         else:
             self.grimoire_btn.setText("📕")
             self.grimoire_btn.setToolTip("Tracking view — click for Grimoire view")
+
+    def _update_browser_btn(self) -> None:
+        """The browser button opens the drawer (classic) or swaps the browser
+        into the right pane; a pinned browser has no button."""
+        if not hasattr(self, "browser_btn") or not hasattr(self, "_pane_layout"):
+            return
+        layout = self._pane_layout
+        self._browser_btn_act.setVisible(pane_layout.browser_toggles(layout))
+        self.browser_btn.setChecked(self._browser_shown)
+        if pane_layout.pinned(layout) is None:
+            self.browser_btn.setToolTip("Toggle browser (Ctrl+B)")
+        else:
+            other = pane_layout.swap_pair(layout)[0].capitalize()
+            self.browser_btn.setToolTip(
+                f"Browser ⇄ {other} on the right (Ctrl+B)")
 
     # ================= calibration =================
     def _open_calibration(self) -> None:
@@ -2387,14 +2648,13 @@ class MainWindow(QMainWindow):
 
     # ================= shutdown =================
     def closeEvent(self, event) -> None:
-        # Persist the browser split ratio (kept in memory while the user drags;
-        # only written to config here, once, on exit).
-        if self.browser.isVisible():
-            sizes = self._splitter.sizes()
-            if sizes[1] > 0:
-                self._main_ratio = sizes[0] / (sizes[0] + sizes[1])
-        if self._main_ratio != self.cfg.ui.browser_split_ratio:
-            self.cfg.ui.browser_split_ratio = self._main_ratio
+        # Persist the split ratios (kept in memory while the user drags; only
+        # written to config here, on exit, and on a layout switch).
+        if self._right_on_screen:
+            self._remember_split(self._pane_layout)
+        before = (self.cfg.ui.browser_split_ratio, dict(self.cfg.ui.pane_split_ratios))
+        self._save_split_ratios()
+        if (self.cfg.ui.browser_split_ratio, self.cfg.ui.pane_split_ratios) != before:
             self.cfg.save()
         if getattr(self, "_snapshot_hotkey", None):
             self._snapshot_hotkey.unregister()

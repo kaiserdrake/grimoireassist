@@ -140,16 +140,18 @@ top of the script.
 1. On first launch a **game-select page** appears — pick your game.
 2. Select your capture card from **☰ → Camera** (OBS Virtual Camera is hidden to avoid feedback;
    friendly device names are shown). The **Source** pill turns green when frames arrive.
-3. Press **F9** (or **☰ → Calibrate regions…**) and define, on a frozen frame:
-   - **`monster_1..N`** — the area(s) where monster names appear. Drag to draw; drag the body to
-     move; drag a corner to resize.
-   - **`battle_end`** *(optional)* — the area where end text (e.g. "Result") appears, plus the
+3. Press **F9** (or **☰ → Calibrate regions…**) and define, on a frozen frame, the regions below.
+   Pick one from the **Region** list (slots not drawn yet show "not set"), then drag to draw; drag
+   the body to move; drag a corner to resize. **Delete** (or the Delete key) clears the selected
+   region. Only drawn regions are saved.
+   - **Monster 1–3** — the area(s) where monster names appear.
+   - **Battle end** *(optional)* — the area where end text (e.g. "Result") appears, plus the
      **Battle-End text** field. When that text shows, monster retention drops so the list clears
      promptly after a fight.
-   - **`dialogue`** *(optional)* — the NPC / subtitle text box. Its prose is read as whole
+   - **Dialogue** *(optional)* — the NPC / subtitle text box. Its prose is read as whole
      sentences and narrated aloud. See [Dialogue narration](#dialogue-narration).
-   - **`labels`** *(optional)* — a map or inventory area. Its labels (place and item names) are
-     listed as copyable terms, never spoken. See [Copyable terms](#copyable-terms).
+   - **Labels 1–4** *(optional)* — map or inventory areas. Their labels (place and item names)
+     are listed as copyable terms, never spoken. See [Copyable terms](#copyable-terms).
    Click **Save** — regions are stored per game and applied live (no restart).
 4. **Import monster data** via **☰ → Import monster data…** — this populates the monster list used
    for fuzzy matching (without it there's nothing to match detections against) and the in-app
@@ -627,7 +629,8 @@ in `config.yaml`:
   "regions": {
     "monster_names": [ {"x":0,"y":0,"w":0,"h":0} ],
     "battle_end": {"x":0,"y":0,"w":0,"h":0},
-    "dialogue": {"x":0,"y":0,"w":0,"h":0}
+    "dialogue": {"x":0,"y":0,"w":0,"h":0},
+    "labels": [ {"x":0,"y":0,"w":0,"h":0} ]
   },
   "keywords": { "battle_end": ["result", "victory", "defeat"] },
   "monster_persist_s": 12.0,

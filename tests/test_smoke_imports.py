@@ -31,9 +31,9 @@ def test_labels_region_roundtrips_and_old_settings_still_load(tmp_path):
     import json
     p = tmp_path / "config.yaml"
     cfg = Config()
-    cfg.set_regions_for("mhs3", GameSettings(labels=Region(100, 200, 300, 400)))
+    cfg.set_regions_for("mhs3", GameSettings(labels=[Region(100, 200, 300, 400)]))
     cfg.save(p)
-    assert Config.load(p).regions_for("mhs3").labels.h == 400
+    assert Config.load(p).regions_for("mhs3").labels[0].h == 400
 
     # A settings.json written before the labels region existed.
     old = tmp_path / "games" / "old" / "settings.json"
@@ -41,7 +41,7 @@ def test_labels_region_roundtrips_and_old_settings_still_load(tmp_path):
     old.write_text(json.dumps({"regions": {"dialogue": {"x": 1, "y": 2, "w": 3, "h": 4}}}),
                    encoding="utf-8")
     gs = Config.load(p).regions_for("old")
-    assert gs.dialogue.w == 3 and not gs.labels.is_set()
+    assert gs.dialogue.w == 3 and gs.labels == []
 
 
 def test_speech_settings_roundtrip(tmp_path):

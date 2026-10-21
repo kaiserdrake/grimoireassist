@@ -325,6 +325,7 @@ class MonsterPanel(QWidget):
         self._loaded_url: Optional[str] = None
         self._imported: Dict = imported_data or {}
         self._grimoire_visible = False   # grimoire view pinned on top of the stack
+        self._grimoire_detached = False  # grimoire view lent out to a pane of its own
 
         self.setStyleSheet("QWidget { background:#15151b; color:#e8e8ec; }")
         outer = QVBoxLayout(self)
@@ -350,6 +351,7 @@ class MonsterPanel(QWidget):
         self._card_group.open_web.connect(self._open_web_for_monster)
         self._stack.addWidget(self._card_group)
 
+        self._fallback: Optional[QWidget] = None
         if _HAVE_WEBENGINE:
             self._profile = shared_grimoire_profile()
             # index 1 — Grimoire notes (unchanged)
@@ -372,6 +374,7 @@ class MonsterPanel(QWidget):
             fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
             fallback.setStyleSheet("color:#c66;")
             self._stack.addWidget(fallback)
+            self._fallback = fallback
 
     def _make_view(self, persistent: bool, grimoire_fix: bool) -> "QWebEngineView":
         """A web view: persistent (logged-in) profile or the default; optional grimoire
@@ -415,11 +418,39 @@ class MonsterPanel(QWidget):
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------
     def set_grimoire_visible(self, visible: bool) -> None:
-        self._grimoire_visible = visible
-        if visible:
-            self._stack.setCurrentIndex(1)   # grimoire notes
+        # A lent-out Grimoire is on screen elsewhere; this panel keeps tracking.
+        self._grimoire_visible = bool(visible) and not self._grimoire_detached
+        if self._grimoire_visible:
+            self._stack.setCurrentWidget(self._grimoire_web or self._fallback)
         else:
             self._show_monster_view()
+
+    def grimoire_view(self) -> Optional[QWidget]:
+        """The Grimoire web view, or None without WebEngine."""
+        return self._grimoire_web
+
+    def detach_grimoire(self) -> Optional[QWidget]:
+        """Take the Grimoire view out of the stack so the caller can give it a
+        pane of its own (layouts that show tracking and Grimoire side by side).
+        Returns it, or None without WebEngine; the caller re-parents it."""
+        if not self._grimoire_detached:
+            self._grimoire_detached = True
+            if self._grimoire_web is not None:
+                self._stack.removeWidget(self._grimoire_web)
+            self.set_grimoire_visible(False)
+        return self._grimoire_web
+
+    def attach_grimoire(self) -> None:
+        """Take a detached Grimoire view back into the stack."""
+        if not self._grimoire_detached:
+            return
+        self._grimoire_detached = False
+        if self._grimoire_web is not None:
+            self._stack.insertWidget(1, self._grimoire_web)
+        self._show_monster_view()
+
+    def is_grimoire_detached(self) -> bool:
+        return self._grimoire_detached
 
     def set_countdown(self, seconds: Optional[int]) -> None:
         if seconds is None:
@@ -459,9 +490,9 @@ class MonsterPanel(QWidget):
         """Pick the non-grimoire view: web fallback when there is no imported
         data but a monster is detected, local cards otherwise."""
         if not self._imported and self.current and self.web is not None:
-            self._stack.setCurrentIndex(2)
+            self._stack.setCurrentWidget(self.web)
         else:
-            self._stack.setCurrentIndex(0)
+            self._stack.setCurrentWidget(self._card_group)
 
     def show_monster(self, name: str) -> None:
         self.show_monsters([name] if name else [])
@@ -477,7 +508,7 @@ class MonsterPanel(QWidget):
             self._loaded_url = url
         else:
             self.web.setHtml(_BLANK_HTML)
-        self._stack.setCurrentIndex(2)
+        self._stack.setCurrentWidget(self.web)
 
     def update_imported_data(self, data: dict, image_base: Optional[Path] = None) -> None:
         """Refresh local data after a re-import without rebuilding the panel."""

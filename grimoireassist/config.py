@@ -41,6 +41,26 @@ def _pad_id(value, fallback: str) -> str:
     return valid_id(value, fallback)
 
 
+def _pane_layout(value) -> str:
+    """Which section the window pins to the left; unknown names fall back."""
+    from .ui.pane_layout import normalize
+    return normalize(value)
+
+
+def _split_ratios(value) -> Dict[str, float]:
+    """Per-layout left-pane shares of the splitter, tolerant of junk."""
+    from .ui.pane_layout import LAYOUTS
+    out: Dict[str, float] = {}
+    if isinstance(value, dict):
+        for key, ratio in value.items():
+            if key in LAYOUTS:
+                try:
+                    out[key] = min(max(float(ratio), 0.1), 0.9)
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
 def _overlay_tab(value) -> str:
     """Which page the merged overlay panel opens on."""
     key = str(value or "").strip().lower()
@@ -95,7 +115,7 @@ class OcrConfig:
     regions_monster_names: List[Region] = field(default_factory=lambda: [Region()])
     regions_battle_end: Region = field(default_factory=Region)
     regions_dialogue: Region = field(default_factory=Region)
-    regions_labels: Region = field(default_factory=Region)
+    regions_labels: List[Region] = field(default_factory=list)
     keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
 
     def gpu_effective(self) -> bool:
@@ -114,11 +134,11 @@ class GameSettings:
     """Per-game OCR layout: the monster name region(s), an optional Battle-End
     trigger region, the keyword text that marks the battle end, and an optional
     dialogue region whose prose is read aloud (see speech.py), and an optional
-    labels region over a map or menu whose labels are listed as terms (terms.py)."""
+    labels regions over maps or menus whose labels are listed as terms (terms.py)."""
     monster_names: List[Region] = field(default_factory=lambda: [Region()])
     battle_end: Region = field(default_factory=Region)
     dialogue: Region = field(default_factory=Region)
-    labels: Region = field(default_factory=Region)
+    labels: List[Region] = field(default_factory=list)
     end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
     monster_persist_s: Optional[float] = None       # overrides ocr.monster_persist_s when set
     monster_persist_end_s: Optional[float] = None   # overrides ocr.monster_persist_end_s when set
@@ -131,6 +151,11 @@ class UiConfig:
     snapshot_hotkey: str = "ctrl+alt+s"  # system-wide hotkey that saves a frame snapshot
     mute_hotkey: str = "ctrl+shift+m"   # system-wide hotkey that toggles narration mute
     browser_split_ratio: float = 0.5    # main-pane share of the splitter when the browser is open
+    pane_layout: str = "classic"        # which section is pinned left (see ui.pane_layout):
+                                        # classic | tracking | grimoire | browser
+    pane_split_ratios: Dict[str, float] = field(default_factory=dict)
+                                        # left-pane share per pinned layout; classic
+                                        # keeps using browser_split_ratio
     search_engine: str = "google"       # default engine for non-address browser queries
     show_input_preview: bool = False    # live PiP of the raw capture frames over the tracking view
     preview_fps: float = 10.0           # PiP refresh rate; capped at 30 by the widget
@@ -150,6 +175,7 @@ class UiConfig:
     dialogue_collapsed: bool = False    # dialogue strip folded down to its header
     dialogue_test_box: bool = True      # the type-a-line box inside the dialogue log
     dialogue_height: int = 132          # transcript height in px; drag its bottom grip
+    show_dialogue_log: bool = False     # OCR > Text > Show dialogue log (transcript + terms)
 
 
 @dataclass
@@ -244,7 +270,7 @@ def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
             monster_names=[_region(r) for r in mons],
             battle_end=_region(regions.get("battle_end")),
             dialogue=_region(regions.get("dialogue")),
-            labels=_region(regions.get("labels")),
+            labels=_regions(regions.get("labels")),
             end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
             monster_persist_s=float(raw_p) if raw_p is not None else None,
             monster_persist_end_s=float(raw_pe) if raw_pe is not None else None,
@@ -262,7 +288,7 @@ def _save_game_settings(path: "Path", gs: "GameSettings") -> None:
             "monster_names": [asdict(r) for r in gs.monster_names],
             "battle_end": asdict(gs.battle_end),
             "dialogue": asdict(gs.dialogue),
-            "labels": asdict(gs.labels),
+            "labels": [asdict(r) for r in gs.labels if r.is_set()],
         },
         "keywords": {
             "battle_end": gs.end_keywords,
@@ -279,6 +305,15 @@ def _region(d: dict | None) -> Region:
     d = d or {}
     return Region(int(d.get("x", 0)), int(d.get("y", 0)),
                   int(d.get("w", 0)), int(d.get("h", 0)))
+
+
+def _regions(raw) -> List[Region]:
+    """A multi-instance region list. Also takes the single dict that older
+    settings files stored (labels was one region before it became a list);
+    unset entries are dropped."""
+    if isinstance(raw, dict):
+        raw = [raw]
+    return [r for r in (_region(d) for d in (raw or [])) if r.is_set()]
 
 
 @dataclass
@@ -377,7 +412,7 @@ class Config:
                 monster_names=[_region(r) for r in mons],
                 battle_end=_region(regions.get("battle_end")),
                 dialogue=_region(regions.get("dialogue")),
-                labels=_region(regions.get("labels")),
+                labels=_regions(regions.get("labels")),
                 end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
                 monster_persist_s=float(raw_persist) if raw_persist is not None else None,
                 monster_persist_end_s=float(raw_persist_end) if raw_persist_end is not None else None,
@@ -412,6 +447,8 @@ class Config:
                 snapshot_hotkey=str(ui.get("snapshot_hotkey", "ctrl+alt+s")),
                 mute_hotkey=str(ui.get("mute_hotkey", "ctrl+shift+m")),
                 browser_split_ratio=float(ui.get("browser_split_ratio", 0.5)),
+                pane_layout=_pane_layout(ui.get("pane_layout")),
+                pane_split_ratios=_split_ratios(ui.get("pane_split_ratios")),
                 search_engine=str(ui.get("search_engine", "google")),
                 show_input_preview=bool(ui.get("show_input_preview", False)),
                 preview_fps=float(ui.get("preview_fps", 10.0)),
@@ -432,6 +469,7 @@ class Config:
                 dialogue_collapsed=bool(ui.get("dialogue_collapsed", False)),
                 dialogue_test_box=bool(ui.get("dialogue_test_box", True)),
                 dialogue_height=max(1, int(ui.get("dialogue_height", 132))),
+                show_dialogue_log=bool(ui.get("show_dialogue_log", False)),
             ),
             review=ReviewConfig(
                 enabled=bool(rev.get("enabled", True)),
@@ -529,6 +567,8 @@ class Config:
                 "snapshot_hotkey": self.ui.snapshot_hotkey,
                 "mute_hotkey": self.ui.mute_hotkey,
                 "browser_split_ratio": self.ui.browser_split_ratio,
+                "pane_layout": self.ui.pane_layout,
+                "pane_split_ratios": dict(self.ui.pane_split_ratios),
                 "search_engine": self.ui.search_engine,
                 "show_input_preview": self.ui.show_input_preview,
                 "preview_fps": self.ui.preview_fps,
@@ -546,6 +586,7 @@ class Config:
                 "dialogue_collapsed": self.ui.dialogue_collapsed,
                 "dialogue_test_box": self.ui.dialogue_test_box,
                 "dialogue_height": self.ui.dialogue_height,
+                "show_dialogue_log": self.ui.show_dialogue_log,
             },
             "review": {
                 "enabled": self.review.enabled,

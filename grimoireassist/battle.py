@@ -181,6 +181,16 @@ class _Slot:
     confirmed: Optional[str] = None
 
 
+@dataclass
+class _LabelSlot:
+    """Read state for one labels region (see OcrWorker._read_labels)."""
+    sig: Optional[np.ndarray] = None   # last fingerprint of the region
+    ocr_t: float = 0.0                 # when it was last actually OCR'd
+    prev: set = field(default_factory=set)     # label keys on the previous read
+    emitted: set = field(default_factory=set)  # keys already sent for this screen
+    boxes: list = field(default_factory=list)  # frame-coord boxes of its lines
+
+
 class BattleStateMachine:
     """Drives transitions from successive OCR reads.
 
@@ -337,11 +347,9 @@ try:
             self._dlg_header = ""          # its box header / speaker label, if any
             self._dlg_boxes: list = []     # frame-coord boxes of the dialogue lines
             self.lexicon: Optional[Lexicon] = None   # set by the UI per game
-            self._lbl_sig = None           # last labels-region fingerprint
-            self._lbl_ocr_t = 0.0
-            self._lbl_prev: set = set()    # label keys on the previous read
-            self._lbl_emitted: set = set() # label keys already sent for this screen
-            self._lbl_boxes: list = []     # frame-coord boxes of the label lines
+            # One _LabelSlot per labels region, keyed by its geometry so a
+            # recalibrated region starts fresh.
+            self._lbl_slots: dict = {}
             self._scan_requested = False
             self.reader = StatementReader(
                 stable_frames=cfg.speech.stable_frames,
@@ -501,49 +509,67 @@ try:
                 self.debug_text.emit(f"[dialogue] {label}{statement}", [])
                 self.dialogue_text.emit(statement, self._dlg_header)
 
-        def _read_labels(self, frame: np.ndarray, now: float) -> None:
-            """OCR the labels region (a map or menu area) and emit new terms.
+        @property
+        def _lbl_boxes(self) -> list:
+            """Frame-coord boxes of the label lines, across all labels regions."""
+            return [b for slot in self._lbl_slots.values() for b in slot.boxes]
 
-            Unlike the dialogue region this one IS change-gated: map labels and
+        def _read_labels(self, frame: np.ndarray, now: float) -> None:
+            """OCR each labels region (a map or menu area) and emit new terms.
+
+            Unlike the dialogue region these ARE change-gated: map labels and
             inventory lists don't type themselves out, so a still region means
             the same labels, and the heartbeat catches a bad read. A label is
             sent once it has read the same on two reads in a row — a screen
             mid-transition reads as fragments that never repeat — and only once
-            per screen; an empty read (screen closed) lets them come back."""
-            region = self.cfg.ocr.regions_labels
-            if not region.is_set():
-                if self._lbl_boxes or self._lbl_prev:
-                    self._lbl_boxes, self._lbl_prev = [], set()
-                    self._lbl_emitted = set()
-                return
+            per screen; an empty read (screen closed) lets them come back.
+            Each region keeps that state on its own, so one menu closing doesn't
+            re-send the labels of a map that is still up."""
+            regions = [r for r in self.cfg.ocr.regions_labels if r.is_set()]
+            keys = [(r.x, r.y, r.w, r.h) for r in regions]
+            self._lbl_slots = {k: self._lbl_slots.get(k) or _LabelSlot()
+                               for k in keys}
+            fresh: list = []
+            sent: set = set()   # one batch never carries a label twice
+            for key, region in zip(keys, regions):
+                for t in self._read_label_region(frame, now, region,
+                                                 self._lbl_slots[key]):
+                    if statement_key(t.text) not in sent:
+                        sent.add(statement_key(t.text))
+                        fresh.append(t)
+            if fresh:
+                self.debug_text.emit(
+                    "[labels] " + "  |  ".join(t.text for t in fresh), [])
+                self.labels_seen.emit(fresh)
+
+        def _read_label_region(self, frame: np.ndarray, now: float,
+                               region: Region, slot: "_LabelSlot") -> list:
+            """One labels region's read: the terms it newly confirms."""
             crop = self._crop(frame, region)
             if crop is None:
-                return
+                return []
             g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
             sig = cv2.resize(g, (64, 32), interpolation=cv2.INTER_AREA).astype(np.int16)
-            changed = (self._lbl_sig is None or self._lbl_sig.shape != sig.shape
-                       or float(np.abs(sig - self._lbl_sig).mean()) >= self._CHANGE_THRESHOLD)
-            if not changed and (now - self._lbl_ocr_t) < self._HEARTBEAT_S:
-                return
-            self._lbl_sig, self._lbl_ocr_t = sig, now
+            changed = (slot.sig is None or slot.sig.shape != sig.shape
+                       or float(np.abs(sig - slot.sig).mean()) >= self._CHANGE_THRESHOLD)
+            if not changed and (now - slot.ocr_t) < self._HEARTBEAT_S:
+                return []
+            slot.sig, slot.ocr_t = sig, now
             lines = [] if float(g.std()) < self._BLANK_STDDEV else self.engine.read_lines(crop)
-            self._lbl_boxes = [(region.x + b[0], region.y + b[1], b[2], b[3])
-                               for _t, _c, b in lines if b is not None]
+            slot.boxes = [(region.x + b[0], region.y + b[1], b[2], b[3])
+                          for _t, _c, b in lines if b is not None]
             if lines and all(len(e) > 2 and e[2] is not None for e in lines):
                 lines = in_reading_order(lines)
             found = label_terms(lines, self.lexicon, source="map/menu")
             keys = {statement_key(t.text) for t in found}
             if not found:
-                self._lbl_emitted = set()
+                slot.emitted = set()
             fresh = [t for t in found
-                     if statement_key(t.text) in self._lbl_prev
-                     and statement_key(t.text) not in self._lbl_emitted]
-            self._lbl_prev = keys
-            if fresh:
-                self._lbl_emitted.update(statement_key(t.text) for t in fresh)
-                self.debug_text.emit(
-                    "[labels] " + "  |  ".join(t.text for t in fresh), [])
-                self.labels_seen.emit(fresh)
+                     if statement_key(t.text) in slot.prev
+                     and statement_key(t.text) not in slot.emitted]
+            slot.prev = keys
+            slot.emitted.update(statement_key(t.text) for t in fresh)
+            return fresh
 
         def request_scan(self) -> None:
             """Read the whole next frame for terms (see `scan_frame_terms`).
@@ -643,12 +669,11 @@ try:
                                        dlg_region.w, dlg_region.h, False))
                         status.extend((x, y, w, h, True)
                                       for x, y, w, h in self._dlg_boxes)
-                    lbl_region = self.cfg.ocr.regions_labels
-                    if lbl_region.is_set():
-                        status.append((lbl_region.x, lbl_region.y,
-                                       lbl_region.w, lbl_region.h, False))
-                        status.extend((x, y, w, h, True)
-                                      for x, y, w, h in self._lbl_boxes)
+                    status.extend((r.x, r.y, r.w, r.h, False)
+                                  for r in self.cfg.ocr.regions_labels
+                                  if r.is_set())
+                    status.extend((x, y, w, h, True)
+                                  for x, y, w, h in self._lbl_boxes)
                     status.extend((x, y, w, h, True)
                                   for x, y, w, h in self._match_boxes)
                     if status != self._last_status:

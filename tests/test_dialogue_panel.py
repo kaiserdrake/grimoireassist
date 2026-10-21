@@ -472,6 +472,9 @@ class _ViewWindow:
     """The slice of MainWindow that decides whether the strip is on screen."""
 
     def __init__(self):
+        self.cfg = Config()
+        self.saves = []
+        self.cfg.save = lambda *a, **k: self.saves.append(1)
         self._dialogue_widget = QWidget()
         self._dialogue_wanted = False
         self._grimoire_shown = False
@@ -505,6 +508,20 @@ def _want(win, wanted):
 def _grimoire(win, shown):
     win._grimoire_shown = shown
     MainWindow._apply_dialogue_visibility(win)
+
+
+def test_showing_the_strip_is_remembered(app):
+    win = _ViewWindow()
+    _want(win, True)
+    assert win.cfg.ui.show_dialogue_log is True
+    assert win.saves
+    _want(win, False)
+    assert win.cfg.ui.show_dialogue_log is False
+    back = Config.from_dict(win.cfg.to_dict()).ui
+    assert back.show_dialogue_log is False
+    win.cfg.ui.show_dialogue_log = True
+    assert Config.from_dict(win.cfg.to_dict()).ui.show_dialogue_log is True
+    assert Config().ui.show_dialogue_log is False
 
 
 def test_the_strip_shows_on_the_tracking_view(app):
@@ -887,3 +904,32 @@ def test_spans_of_dropped_lines_are_forgotten(app):
     for i in range(_DIALOGUE_MAX_LINES + 3):
         _say(win, f"Line {i} in Kamura Village.")
     assert len(win._dialogue_spans) == _DIALOGUE_MAX_LINES
+
+
+def _term_column_window():
+    win = _term_window()
+    win._term_chip = lambda term: MainWindow._term_chip(win, term)
+    win._show_all_terms = lambda: None
+    column = MainWindow._build_term_column(win)
+    return win, column
+
+
+def test_the_terms_column_shows_a_placeholder_until_terms_arrive(app):
+    win, _column = _term_column_window()
+    MainWindow._refresh_term_chips(win)
+    assert not win._term_placeholder.isHidden()
+    assert win._term_all_btn.isHidden()
+
+    MainWindow._on_dialogue_text(win, "A Rathalos was seen near Kamura Village.", "")
+    chips = [win._term_chips_lay.itemAt(i).widget()
+             for i in range(win._term_chips_lay.count())]
+    assert [c.text() for c in chips] == ["Rathalos", "Kamura Village"]
+    assert win._term_placeholder.isHidden()
+    assert win._term_all_btn.text() == "All (2)"
+
+
+def test_term_chips_are_bold(app):
+    win, _column = _term_column_window()
+    from grimoireassist.terms import Term
+    chip = MainWindow._term_chip(win, Term("Rathalos", "monster"))
+    assert "font-weight:bold" in chip.styleSheet()

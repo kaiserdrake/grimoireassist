@@ -35,6 +35,31 @@ def _migrate_webengine_storage() -> None:
         pass  # worst case the user logs in again
 
 
+def _chevron_png(color: str) -> str:
+    """Paint the combo-box drop-down chevron and return its path for a style
+    sheet url(). Painted rather than shipped so the build needs no extra data
+    file or SVG plugin; drawn at 2x so it stays crisp on high-DPI screens."""
+    import tempfile
+
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QColor, QImage, QPainter, QPen
+
+    img = QImage(20, 12, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    img.setDevicePixelRatio(2.0)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.drawPolyline([QPointF(1.5, 1.5), QPointF(5.0, 4.5), QPointF(8.5, 1.5)])
+    p.end()
+    path = Path(tempfile.gettempdir()) / f"grimoireassist-chevron-{color.lstrip('#')}@2x.png"
+    img.save(str(path))
+    return path.as_posix()
+
+
 def _list_devices() -> int:
     from .capture import list_devices
     found = list_devices()
@@ -176,7 +201,20 @@ def main(argv: list[str] | None = None) -> int:
             QComboBox {
                 background: #2a2a36; color: #e8e8ec;
                 border: 1px solid #3a3a50; border-radius: 4px; padding: 4px 8px;
+                padding-right: 24px;
             }
+            QComboBox:hover { border-color: #5a5a70; }
+            /* No separate button box: a bordered combo otherwise gets Fusion's
+               bevelled drop-down button, which never lines up with the frame.
+               Just a chevron, painted at startup (see _chevron_png). */
+            QComboBox::drop-down {
+                subcontrol-origin: padding; subcontrol-position: center right;
+                width: 22px; border: none; background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: url("@CHEVRON@"); width: 10px; height: 6px;
+            }
+            QComboBox::down-arrow:on { image: url("@CHEVRON_ON@"); }
             QComboBox QAbstractItemView {
                 background: #1e1e28; color: #e8e8ec;
                 selection-background-color: #5b3fa6;
@@ -192,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
                 border: 1px solid #3a3a50; border-radius: 3px; background: #2a2a36;
             }
             QCheckBox::indicator:checked { background: #5b3fa6; border-color: #5b3fa6; }
-        """)
+        """.replace("@CHEVRON@", _chevron_png("#8a8a99"))
+           .replace("@CHEVRON_ON@", _chevron_png("#e8e8ec")))
     # QtWebEngine (embedded monster page) wants shared OpenGL contexts, set
     # before the QApplication is created.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)

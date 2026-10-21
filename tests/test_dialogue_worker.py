@@ -141,7 +141,7 @@ def test_dialogue_boxes_are_reported_in_frame_coordinates():
 def _labels_worker(engine, speech=False):
     cfg = Config()
     cfg.speech.enabled = speech          # labels don't depend on narration
-    cfg.ocr.regions_labels = Region(10, 150, 300, 60)
+    cfg.ocr.regions_labels = [Region(10, 150, 300, 60)]
     worker = OcrWorker(cfg, None, engine)
     seen = []
     worker.labels_seen.connect(seen.append)
@@ -181,9 +181,93 @@ def test_labels_come_back_after_the_screen_closes():
 def test_no_labels_region_means_no_reads():
     engine = _FakeEngine(_menu())
     worker, _seen = _labels_worker(engine)
-    worker.cfg.ocr.regions_labels = Region()
+    worker.cfg.ocr.regions_labels = []
     worker._read_labels(_textured_frame(), 1.0)
     assert engine.reads == 0
+
+
+# ── several labels regions ──────────────────────────────────────────────────
+_TOP = Region(10, 20, 300, 60)      # dimmer panel: crop mean ≈ 95
+_BOTTOM = Region(10, 150, 300, 60)  # brighter panel: crop mean ≈ 140
+
+
+class _PanelEngine:
+    """Answers per panel, told apart by brightness. `top` / `bottom` are the
+    lines each panel currently shows; change them to open or close a screen."""
+
+    def __init__(self, top, bottom):
+        self.top, self.bottom = list(top), list(bottom)
+
+    def read_lines(self, image):
+        return list(self.bottom if float(image.mean()) > 117 else self.top)
+
+
+def _two_panel_frame():
+    frame = _textured_frame()
+    frame[20:80, 10:310] = 60
+    frame[30:70, 20:280] = 120
+    return frame
+
+
+def _two_region_worker(engine):
+    cfg = Config()
+    cfg.ocr.regions_labels = [_TOP, _BOTTOM]
+    worker = OcrWorker(cfg, None, engine)
+    seen = []
+    worker.labels_seen.connect(seen.append)
+    return worker, seen
+
+
+def _texts(seen):
+    return [[t.text for t in batch] for batch in seen]
+
+
+def test_every_labels_region_is_read():
+    engine = _PanelEngine(top=[("Iron Sword", 0.9, (0, 0, 120, 18))],
+                          bottom=[("Mega Potion", 0.9, (0, 0, 120, 18))])
+    worker, seen = _two_region_worker(engine)
+    worker._read_labels(_two_panel_frame(), 1.0)
+    worker._read_labels(_two_panel_frame(), 2.5)
+    assert _texts(seen) == [["Iron Sword", "Mega Potion"]]
+    assert len(worker._lbl_boxes) == 2            # one line from each region
+
+
+def test_the_same_label_in_two_regions_is_sent_once():
+    line = [("Iron Sword", 0.9, (0, 0, 120, 18))]
+    worker, seen = _two_region_worker(_PanelEngine(top=line, bottom=line))
+    worker._read_labels(_two_panel_frame(), 1.0)
+    worker._read_labels(_two_panel_frame(), 2.5)
+    assert _texts(seen) == [["Iron Sword"]]
+
+
+def test_labels_regions_keep_their_own_screen_state():
+    """One menu closing and reopening re-sends its labels — but not those of
+    the map that stayed up in the other region."""
+    engine = _PanelEngine(top=[("Iron Sword", 0.9, (0, 0, 120, 18))],
+                          bottom=[("Mega Potion", 0.9, (0, 0, 120, 18))])
+    worker, seen = _two_region_worker(engine)
+    t = 1.0
+    for _ in range(2):
+        worker._read_labels(_two_panel_frame(), t)
+        t += 2
+    engine.bottom = []                             # the menu closes
+    worker._read_labels(_two_panel_frame(), t)
+    t += 2
+    engine.bottom = [("Mega Potion", 0.9, (0, 0, 120, 18))]  # ...and reopens
+    for _ in range(2):
+        worker._read_labels(_two_panel_frame(), t)
+        t += 2
+    assert _texts(seen) == [["Iron Sword", "Mega Potion"], ["Mega Potion"]]
+
+
+def test_removing_a_labels_region_drops_its_boxes():
+    engine = _PanelEngine(top=[("Iron Sword", 0.9, (0, 0, 120, 18))],
+                          bottom=[("Mega Potion", 0.9, (0, 0, 120, 18))])
+    worker, _seen = _two_region_worker(engine)
+    worker._read_labels(_two_panel_frame(), 1.0)
+    worker.cfg.ocr.regions_labels = [_TOP]
+    worker._read_labels(_two_panel_frame(), 1.2)
+    assert worker._lbl_boxes == [(_TOP.x, _TOP.y, 120, 18)]
 
 
 def test_a_requested_scan_reads_the_whole_frame_once():
