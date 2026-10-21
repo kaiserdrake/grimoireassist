@@ -126,6 +126,12 @@ python -m grimoireassist --device 1                   REM force a device index
 python -m grimoireassist --video samples\clip.mp4     REM test against a recorded clip
 ```
 
+**Test clip without a game:** `run_test_video.bat` launches the app on a synthetic, looping
+clip (`samples\terms_test.mp4`: typed dialogue, a map, an inventory menu, a battle banner). If the
+clip is missing it is built first by `tools\make_terms_video.py` (about a minute). Delete the clip to
+rebuild it after editing that script. The F9 region coordinates that fit the clip are listed at the
+top of the script.
+
 > Only one instance can use the capture device at a time, so a second launch is refused
 > ("GrimoireAssist is already running").
 

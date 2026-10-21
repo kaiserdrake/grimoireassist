@@ -80,8 +80,9 @@ def test_menu_labels_become_terms_and_counters_drop():
 
 
 def test_button_hints_and_noise_are_not_labels():
-    terms = label_terms(_lines("Related Tips", "Place Marker", "120", "ab", "x3"), LEX)
-    assert terms == []
+    terms = label_terms(_lines("Related Tips", "Place Marker", "Find Self", "120", "ab",
+                               "x3"), LEX)
+    assert terms == []      # "Find Self" must not leave "Self" behind
 
 
 def test_prose_on_a_menu_is_searched_not_taken_whole():

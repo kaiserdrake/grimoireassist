@@ -299,6 +299,8 @@ def label_terms(lines: Sequence, lexicon: Optional[Lexicon] = None,
 
     for line in lines:
         raw = line[0] if isinstance(line, (tuple, list)) else str(line)
+        if statement_key(raw) in _STOP_PHRASES:
+            continue        # a button hint: not a label, and no name inside it
         label = label_text(raw)
         if label and _title_shaped(label):
             add(_term_for(label, lexicon, source))
