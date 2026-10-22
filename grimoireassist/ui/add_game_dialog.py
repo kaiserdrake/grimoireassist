@@ -1,7 +1,8 @@
-"""Dialog for adding a new game to the catalog."""
+"""Dialog for adding a new game to the catalog, or editing an existing one."""
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from urllib.parse import unquote
 
 from PyQt6.QtWidgets import (
@@ -29,12 +30,17 @@ _SAMPLE_NAMES = ["Great Jagras", "Anjanath"]
 
 
 class AddGameDialog(QDialog):
-    def __init__(self, config_path, parent=None) -> None:
+    def __init__(self, config_path, parent=None,
+                 game: GameInfo | None = None) -> None:
+        """With `game`, the dialog edits that entry: fields start filled in
+        and the ID is fixed, since it names the game's folder on disk."""
         super().__init__(parent)
         self._config_path = config_path
+        self._editing = game
         self.result_game: GameInfo | None = None
+        accept_text = "Save" if game else "Add"
 
-        self.setWindowTitle("Add game")
+        self.setWindowTitle("Edit game" if game else "Add game")
         self.setMinimumWidth(480)
         self.setStyleSheet(
             "QDialog { background:#15151b; }"
@@ -45,7 +51,7 @@ class AddGameDialog(QDialog):
             "QPushButton { background:#2a2a36; color:#e8e8ec; border:none;"
             "  border-radius:6px; padding:6px 16px; }"
             "QPushButton:hover { background:#3a3a50; }"
-            "QPushButton[text='Add'] { background:#5b3fa6; color:#fff; font-weight:600; }"
+            f"QPushButton[text='{accept_text}'] {{ background:#5b3fa6; color:#fff; font-weight:600; }}"
         )
 
         lay = QVBoxLayout(self)
@@ -120,12 +126,27 @@ class AddGameDialog(QDialog):
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel)
-        add_btn = buttons.addButton("Add", QDialogButtonBox.ButtonRole.AcceptRole)
+        add_btn = buttons.addButton(accept_text, QDialogButtonBox.ButtonRole.AcceptRole)
         add_btn.setObjectName("add")
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        if game:
+            self._fill(game)
         self._update_url_hint()
+
+    def _fill(self, game: GameInfo) -> None:
+        self._id.setText(game.id)
+        self._id.setReadOnly(True)
+        self._id.setToolTip("The ID names the game's folder and can't be changed.")
+        self._id.setStyleSheet("color:#8a8a99;")
+        self._name.setText(game.name)
+        self._url.setText(game.site_url_template)
+        idx = self._url_style.findData(game.url_style)
+        self._url_style.setCurrentIndex(max(idx, 0))
+        self._notes_url.setText(game.notes_url)
+        self._login.setChecked(game.requires_login)
+        self._cards_per_row.setValue(game.cards_per_row)
 
     def _update_url_hint(self) -> None:
         """Placeholder and preview line follow the chosen style, so the two
@@ -151,14 +172,15 @@ class AddGameDialog(QDialog):
             f"With {' + '.join(_SAMPLE_NAMES)} on screen this opens:\n{unquote(url)}")
 
     def _on_accept(self) -> None:
-        game_id = self._id.text().strip().lower()
+        game_id = (self._editing.id if self._editing
+                   else self._id.text().strip().lower())
         name = self._name.text().strip()
         url = self._url.text().strip()
 
         if not game_id:
             self._show_error("Game ID is required.")
             return
-        if not re.fullmatch(r"[a-z0-9_-]+", game_id):
+        if self._editing is None and not re.fullmatch(r"[a-z0-9_-]+", game_id):
             self._show_error("Game ID may only contain letters, digits, hyphens and underscores.")
             return
         if not name:
@@ -168,8 +190,7 @@ class AddGameDialog(QDialog):
             self._show_error("Site URL template is required.")
             return
 
-        game = GameInfo(
-            id=game_id,
+        fields = dict(
             name=name,
             site_url_template=url,
             url_style=self._url_style.currentData(),
@@ -177,8 +198,13 @@ class AddGameDialog(QDialog):
             requires_login=self._login.isChecked(),
             cards_per_row=self._cards_per_row.value(),
         )
+        if self._editing:
+            # replace() keeps what the form doesn't show (multi_joiner).
+            game = replace(self._editing, **fields)
+        else:
+            game = GameInfo(id=game_id, **fields)
         save_game(game, self._config_path)
-        write_default_settings(game_id, self._config_path)
+        write_default_settings(game.id, self._config_path)
         self.result_game = game
         self.accept()
 

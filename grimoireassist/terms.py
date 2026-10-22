@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import difflib
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .dialogue import clean_statement, statement_key
 
@@ -316,11 +317,19 @@ class TermLog:
     """Recently seen terms, newest first, one entry per distinct term.
 
     Seeing a term again moves it back to the front. A term first guessed from
-    capitalisation keeps the better kind if a list later recognises it."""
+    capitalisation keeps the better kind if a list later recognises it.
 
-    def __init__(self, maxlen: int = 40) -> None:
+    With a `ttl` (seconds), each term lasts that long after it was last seen:
+    `expire()` drops the ones whose time is up, and seeing a term again starts
+    its clock over. `clock` is injectable for tests."""
+
+    def __init__(self, maxlen: int = 40, ttl: Optional[float] = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.maxlen = max(1, maxlen)
+        self.ttl = ttl if ttl and ttl > 0 else None
+        self._clock = clock
         self._items: "OrderedDict[str, Term]" = OrderedDict()
+        self._seen: Dict[str, float] = {}
 
     def add(self, term: Term) -> None:
         key = statement_key(term.text)
@@ -331,8 +340,21 @@ class TermLog:
             term = Term(term.text, old.kind, term.source)
         self._items[key] = term
         self._items.move_to_end(key, last=False)
+        self._seen[key] = self._clock()
         while len(self._items) > self.maxlen:
-            self._items.popitem(last=True)
+            dropped, _ = self._items.popitem(last=True)
+            self._seen.pop(dropped, None)
+
+    def expire(self) -> bool:
+        """Drop terms not seen for `ttl` seconds. True if any went."""
+        if self.ttl is None or not self._items:
+            return False
+        cutoff = self._clock() - self.ttl
+        stale = [k for k in self._items if self._seen.get(k, cutoff) <= cutoff]
+        for key in stale:
+            del self._items[key]
+            self._seen.pop(key, None)
+        return bool(stale)
 
     def extend(self, terms: Iterable[Term]) -> None:
         # Added in reverse so the first of a batch ends up first in the log.
@@ -344,6 +366,7 @@ class TermLog:
 
     def clear(self) -> None:
         self._items.clear()
+        self._seen.clear()
 
     def __len__(self) -> int:
         return len(self._items)

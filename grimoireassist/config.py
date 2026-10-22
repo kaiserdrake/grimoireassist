@@ -41,6 +41,13 @@ def _pad_id(value, fallback: str) -> str:
     return valid_id(value, fallback)
 
 
+def _non_negative(value, default: float) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _pane_layout(value) -> str:
     """Which section the window pins to the left; unknown names fall back."""
     from .ui.pane_layout import normalize
@@ -59,6 +66,18 @@ def _split_ratios(value) -> Dict[str, float]:
                 except (TypeError, ValueError):
                     pass
     return out
+
+
+def _dialogue_tab(value) -> str:
+    """Which tab the dialogue strip opens on."""
+    key = str(value or "").strip().lower()
+    return key if key in ("dialogue", "terms") else "dialogue"
+
+
+def _tracking_tab(value) -> str:
+    """Which tab the tracking section opens on."""
+    key = str(value or "").strip().lower()
+    return key if key in ("monster", "minimap") else "monster"
 
 
 def _overlay_tab(value) -> str:
@@ -116,6 +135,7 @@ class OcrConfig:
     regions_battle_end: Region = field(default_factory=Region)
     regions_dialogue: Region = field(default_factory=Region)
     regions_labels: List[Region] = field(default_factory=list)
+    regions_minimap: Region = field(default_factory=Region)
     keywords_battle_end: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
 
     def gpu_effective(self) -> bool:
@@ -134,11 +154,13 @@ class GameSettings:
     """Per-game OCR layout: the monster name region(s), an optional Battle-End
     trigger region, the keyword text that marks the battle end, and an optional
     dialogue region whose prose is read aloud (see speech.py), and an optional
-    labels regions over maps or menus whose labels are listed as terms (terms.py)."""
+    labels regions over maps or menus whose labels are listed as terms (terms.py),
+    and an optional minimap region shown enlarged on the Minimap tab."""
     monster_names: List[Region] = field(default_factory=lambda: [Region()])
     battle_end: Region = field(default_factory=Region)
     dialogue: Region = field(default_factory=Region)
     labels: List[Region] = field(default_factory=list)
+    minimap: Region = field(default_factory=Region)
     end_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_END_KEYWORDS))
     monster_persist_s: Optional[float] = None       # overrides ocr.monster_persist_s when set
     monster_persist_end_s: Optional[float] = None   # overrides ocr.monster_persist_end_s when set
@@ -172,10 +194,14 @@ class UiConfig:
     controller_map_collapsed: bool = False  # folded down to the header pill
     merge_overlays: bool = False        # PiP and pad map share one tabbed panel
     overlay_tab: str = "pad"            # tab shown while merged: "pad" or "input"
+    show_dialogue_strip: bool = True    # OCR > Text > Show Dialogue/Terms (the tabbed strip)
     dialogue_collapsed: bool = False    # dialogue strip folded down to its header
+    dialogue_tab: str = "dialogue"      # strip tab shown: "dialogue" or "terms"
+    tracking_tab: str = "monster"       # tracking section tab: "monster" or "minimap"
     dialogue_test_box: bool = True      # the type-a-line box inside the dialogue log
     dialogue_height: int = 132          # transcript height in px; drag its bottom grip
-    show_dialogue_log: bool = False     # OCR > Text > Show dialogue log (transcript + terms)
+    term_expiry_s: float = 12.0         # a term chip goes this long after it was last
+                                        # seen; seeing it again restarts it (0 = never)
 
 
 @dataclass
@@ -271,6 +297,7 @@ def _load_game_settings(path: "Path") -> "Optional[GameSettings]":
             battle_end=_region(regions.get("battle_end")),
             dialogue=_region(regions.get("dialogue")),
             labels=_regions(regions.get("labels")),
+            minimap=_region(regions.get("minimap")),
             end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
             monster_persist_s=float(raw_p) if raw_p is not None else None,
             monster_persist_end_s=float(raw_pe) if raw_pe is not None else None,
@@ -289,6 +316,7 @@ def _save_game_settings(path: "Path", gs: "GameSettings") -> None:
             "battle_end": asdict(gs.battle_end),
             "dialogue": asdict(gs.dialogue),
             "labels": [asdict(r) for r in gs.labels if r.is_set()],
+            "minimap": asdict(gs.minimap),
         },
         "keywords": {
             "battle_end": gs.end_keywords,
@@ -413,6 +441,7 @@ class Config:
                 battle_end=_region(regions.get("battle_end")),
                 dialogue=_region(regions.get("dialogue")),
                 labels=_regions(regions.get("labels")),
+                minimap=_region(regions.get("minimap")),
                 end_keywords=end_kw or list(_DEFAULT_END_KEYWORDS),
                 monster_persist_s=float(raw_persist) if raw_persist is not None else None,
                 monster_persist_end_s=float(raw_persist_end) if raw_persist_end is not None else None,
@@ -466,10 +495,13 @@ class Config:
                     ui.get("controller_map_collapsed", False)),
                 merge_overlays=bool(ui.get("merge_overlays", False)),
                 overlay_tab=_overlay_tab(ui.get("overlay_tab")),
+                show_dialogue_strip=bool(ui.get("show_dialogue_strip", True)),
                 dialogue_collapsed=bool(ui.get("dialogue_collapsed", False)),
+                dialogue_tab=_dialogue_tab(ui.get("dialogue_tab")),
+                tracking_tab=_tracking_tab(ui.get("tracking_tab")),
                 dialogue_test_box=bool(ui.get("dialogue_test_box", True)),
                 dialogue_height=max(1, int(ui.get("dialogue_height", 132))),
-                show_dialogue_log=bool(ui.get("show_dialogue_log", False)),
+                term_expiry_s=_non_negative(ui.get("term_expiry_s", 12.0), 12.0),
             ),
             review=ReviewConfig(
                 enabled=bool(rev.get("enabled", True)),
@@ -583,10 +615,13 @@ class Config:
                 "controller_map_collapsed": self.ui.controller_map_collapsed,
                 "merge_overlays": self.ui.merge_overlays,
                 "overlay_tab": self.ui.overlay_tab,
+                "show_dialogue_strip": self.ui.show_dialogue_strip,
                 "dialogue_collapsed": self.ui.dialogue_collapsed,
+                "dialogue_tab": self.ui.dialogue_tab,
+                "tracking_tab": self.ui.tracking_tab,
                 "dialogue_test_box": self.ui.dialogue_test_box,
                 "dialogue_height": self.ui.dialogue_height,
-                "show_dialogue_log": self.ui.show_dialogue_log,
+                "term_expiry_s": self.ui.term_expiry_s,
             },
             "review": {
                 "enabled": self.review.enabled,

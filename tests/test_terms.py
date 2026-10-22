@@ -138,6 +138,73 @@ def test_the_log_is_capped_at_the_far_end():
     assert [t.text for t in log.terms()] == ["D4", "C3", "B2"]
 
 
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_term_expires_after_its_ttl():
+    clock = _Clock()
+    log = TermLog(ttl=12, clock=clock)
+    log.add(Term("Hinoa"))
+    clock.now = 11.9
+    assert log.expire() is False
+    assert [t.text for t in log.terms()] == ["Hinoa"]
+    clock.now = 12.0
+    assert log.expire() is True
+    assert log.terms() == []
+
+
+def test_each_term_has_its_own_clock():
+    clock = _Clock()
+    log = TermLog(ttl=12, clock=clock)
+    log.add(Term("Hinoa"))
+    clock.now = 5
+    log.add(Term("Kamura Village"))
+    clock.now = 12
+    log.expire()
+    assert [t.text for t in log.terms()] == ["Kamura Village"]
+    clock.now = 17
+    log.expire()
+    assert log.terms() == []
+
+
+def test_seeing_a_term_again_resets_its_timer():
+    clock = _Clock()
+    log = TermLog(ttl=12, clock=clock)
+    log.add(Term("Rathalos", "monster"))
+    clock.now = 10
+    log.extend([Term("rathalos")])           # seen again, any spelling
+    clock.now = 21
+    assert log.expire() is False
+    assert [t.text for t in log.terms()] == ["rathalos"]
+    clock.now = 22
+    assert log.expire() is True
+
+
+def test_no_ttl_means_terms_never_expire():
+    clock = _Clock()
+    for ttl in (None, 0):
+        log = TermLog(ttl=ttl, clock=clock)
+        log.add(Term("Hinoa"))
+        clock.now += 10_000
+        assert log.expire() is False
+        assert len(log) == 1
+
+
+def test_capped_and_cleared_terms_forget_their_clocks():
+    clock = _Clock()
+    log = TermLog(maxlen=2, ttl=12, clock=clock)
+    for name in ("A1", "B2", "C3"):
+        log.add(Term(name))
+    assert len(log._seen) == 2              # A1 went with its clock
+    log.clear()
+    assert log._seen == {}
+
+
 # ── terms.json ─────────────────────────────────────────────────────────────────
 def test_term_lists_load_from_the_game_folder(tmp_path):
     cfg = tmp_path / "config.yaml"

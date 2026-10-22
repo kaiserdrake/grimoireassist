@@ -56,7 +56,7 @@ def test_config_yaml_games_section_takes_either_shape():
 
 # ---- the dialog ----------------------------------------------------------
 _SLOTS = ["monster_1", "monster_2", "monster_3", "battle_end", "dialogue",
-          "labels_1", "labels_2", "labels_3", "labels_4"]
+          "labels_1", "labels_2", "labels_3", "labels_4", "minimap"]
 
 
 def _dialog(app, **ocr):

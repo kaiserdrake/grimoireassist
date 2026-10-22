@@ -152,6 +152,9 @@ top of the script.
      sentences and narrated aloud. See [Dialogue narration](#dialogue-narration).
    - **Labels 1–4** *(optional)* — map or inventory areas. Their labels (place and item names)
      are listed as copyable terms, never spoken. See [Copyable terms](#copyable-terms).
+   - **Minimap** *(optional)* — the game's minimap, shown live and enlarged on the tracking
+     section's **Minimap** tab (next to **Monster**). Display only: it is never OCR'd, and frames
+     are only read while that tab is showing.
    Click **Save** — regions are stored per game and applied live (no restart).
 4. **Import monster data** via **☰ → Import monster data…** — this populates the monster list used
    for fuzzy matching (without it there's nothing to match detections against) and the in-app
@@ -199,9 +202,10 @@ Left → right: **☰ menu**, the **status pills**, the **monster pills**, and t
   - **Auto-start tracking on launch** — start OCR tracking automatically when the app opens
     instead of waiting for the **▶ Start** button. **Off by default.**
   - **Text ▸** — text read off the screen.
-    - **Show dialogue log** — the running transcript strip above the monster cards (newest line
-      first, chevron folds it away), with the [copyable terms](#copyable-terms) chip strip.
-    - **Show test line box** — the **Test line** field inside that strip, for narrating typed text
+    - **Show Dialogue/Terms** — the tabbed strip above the monster cards
+      (see [The dialogue log](#the-dialogue-log)). **On by default** (`ui.show_dialogue_strip`).
+    - **Show test line box** — the **Test line** field on the dialogue strip's **Dialogue** tab
+      (see [The dialogue log](#the-dialogue-log)), for narrating typed text
       without a capture source. **On by default**; turn it off to keep the strip to the transcript
       alone (`ui.dialogue_test_box`).
     - **Scan screen for terms (F8)** — read the whole current frame once for names, places and
@@ -384,7 +388,7 @@ Three ways to test narration with fixed input rather than a live capture card:
 | Want to | Do this |
 |---|---|
 | Hear a **line again** | Click it in the transcript, then **↻ Replay** (or just double-click it). |
-| Hear a **specific line** | **☰ → OCR → Text → Show dialogue log**, type into **Test line** at the bottom of the strip, press Enter. Hide the box with **Show test line box** when you no longer want it. The text goes through the same cleaning a real read gets — paste in a line with its ▼ arrow and watch it drop out — then it is logged, displayed and spoken. Needs no capture source and no calibrated region. |
+| Hear a **specific line** | On the dialogue strip's **Dialogue** tab, type into **Test line** at the bottom of the strip, press Enter. Hide the box with **Show test line box** when you no longer want it. The text goes through the same cleaning a real read gets — paste in a line with its ▼ arrow and watch it drop out — then it is logged, displayed and spoken. Needs no capture source and no calibrated region. |
 | Check the **voice** only | **☰ → Speech → Test voice** — speaks one canned sentence. |
 | Exercise the **whole pipeline** (OCR included) | `python -m grimoireassist --video samples\clip.mp4` — runs against a recorded clip, so region calibration, statement settling and narration all work exactly as they would live. |
 
@@ -404,8 +408,10 @@ bar and left in the box so you can edit it, rather than being narrated as noise.
 
 ### The dialogue log
 
-**☰ → OCR → Text → Show dialogue log** docks a running transcript **above** the monster cards, in
-the tracking view's own colours. The **newest line sits at the top**, so the line just spoken is
+A strip **above** the monster cards, in the tracking view's own colours, has two tabs:
+**Dialogue**, the running transcript, and **Terms**, the [copyable terms](#copyable-terms) chips.
+It shows on the tracking view while **☰ → OCR → Text → Show Dialogue/Terms** is on; the chevron
+folds it down to its tabs, and the tab you were on is remembered (`ui.dialogue_tab`). The **newest line sits at the top**, so the line just spoken is
 always against the top edge — glanceable mid-fight without chasing a scrollbar.
 
 Each entry is banded against its neighbours so adjacent lines never run together, and carries a
@@ -483,7 +489,8 @@ How a term is recognised:
   picked up, shown in grey. A sentence's capitalised first word only counts as part of a longer
   name. Common opening verbs ("Ask", "Head", "Talk") and button hints never count.
 
-The chip strip lives in the dialogue log, so open it with **☰ → OCR → Text → Show dialogue log**.
+The chips are on the dialogue strip's **Terms** tab. **Scan screen** (F8) switches to it when
+the scan finds something.
 
 ## Detection behaviour
 
@@ -570,6 +577,7 @@ ui:
   auto_start_tracking: false       # start OCR tracking as soon as the app opens
   snapshot_hotkey: ctrl+alt+s      # system-wide snapshot hotkey (ctrl/alt/shift/win + key or F1–F24)
   mute_hotkey: ctrl+shift+m        # system-wide mute/unmute for the narration
+  tracking_tab: monster            # tracking section tab: monster | minimap
   idle_switch_s: 60                # seconds with no object detected before Auto Switch
                                    # falls back to the Grimoire view
   show_controller_map: false       # controller button map over the main pane
@@ -630,7 +638,8 @@ in `config.yaml`:
     "monster_names": [ {"x":0,"y":0,"w":0,"h":0} ],
     "battle_end": {"x":0,"y":0,"w":0,"h":0},
     "dialogue": {"x":0,"y":0,"w":0,"h":0},
-    "labels": [ {"x":0,"y":0,"w":0,"h":0} ]
+    "labels": [ {"x":0,"y":0,"w":0,"h":0} ],
+    "minimap": {"x":0,"y":0,"w":0,"h":0}
   },
   "keywords": { "battle_end": ["result", "victory", "defeat"] },
   "monster_persist_s": 12.0,

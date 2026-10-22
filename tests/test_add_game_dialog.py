@@ -60,3 +60,33 @@ def test_a_template_without_name_is_called_out(dialog):
 def test_stray_braces_are_called_out(dialog):
     dialog._url.setText("https://example.com/{name}/{oops}")
     assert "Only {name}" in dialog._url_hint.text()
+
+
+def test_edit_mode_fills_fields_and_saves_in_place(app, tmp_path):
+    import json
+    from grimoireassist.games import GameInfo, load_catalog, save_game
+    cfg = tmp_path / "config.yaml"
+    save_game(GameInfo("first", "First", "https://a/{name}"), cfg)
+    original = GameInfo("mhs2", "MH Stories 2", "https://b/{name}",
+                        multi_joiner=" | ", cards_per_row=4)
+    save_game(original, cfg)
+    save_game(GameInfo("last", "Last", "https://c/{name}"), cfg)
+    gf = tmp_path / "games" / "games.json"
+    data = json.loads(gf.read_text(encoding="utf-8"))
+    data[1]["custom"] = "kept"
+    gf.write_text(json.dumps(data), encoding="utf-8")
+
+    dlg = AddGameDialog(cfg, game=original)
+    assert dlg.windowTitle() == "Edit game"
+    assert dlg._id.text() == "mhs2" and dlg._id.isReadOnly()
+    assert dlg._name.text() == "MH Stories 2"
+    dlg._name.setText("MH Stories 2: Wings of Ruin")
+    dlg._cards_per_row.setValue(3)
+    dlg._on_accept()
+
+    assert dlg.result_game.name == "MH Stories 2: Wings of Ruin"
+    assert dlg.result_game.multi_joiner == " | "
+    assert [g.id for g in load_catalog(cfg)] == ["first", "mhs2", "last"]
+    saved = json.loads(gf.read_text(encoding="utf-8"))[1]
+    assert saved["cards_per_row"] == 3 and saved["custom"] == "kept"
+    dlg.close()

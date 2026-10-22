@@ -1,0 +1,38 @@
+{
+  "regions": {
+    "monster_names": [
+      {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      }
+    ],
+    "battle_end": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0
+    },
+    "dialogue": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0
+    },
+    "labels": [],
+    "minimap": {
+      "x": 1272,
+      "y": 110,
+      "w": 648,
+      "h": 473
+    }
+  },
+  "keywords": {
+    "battle_end": [
+      "result",
+      "victory",
+      "defeat"
+    ]
+  }
+}

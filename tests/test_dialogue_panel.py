@@ -476,7 +476,6 @@ class _ViewWindow:
         self.saves = []
         self.cfg.save = lambda *a, **k: self.saves.append(1)
         self._dialogue_widget = QWidget()
-        self._dialogue_wanted = False
         self._grimoire_shown = False
         self._debug_widget = QWidget()
         self._debug_widget.setVisible(False)
@@ -501,65 +500,55 @@ class _FakePreview:
         self.inset = value
 
 
-def _want(win, wanted):
-    MainWindow._toggle_dialogue_panel(win, wanted)
-
-
 def _grimoire(win, shown):
     win._grimoire_shown = shown
     MainWindow._apply_dialogue_visibility(win)
 
 
-def test_showing_the_strip_is_remembered(app):
-    win = _ViewWindow()
-    _want(win, True)
-    assert win.cfg.ui.show_dialogue_log is True
-    assert win.saves
-    _want(win, False)
-    assert win.cfg.ui.show_dialogue_log is False
-    back = Config.from_dict(win.cfg.to_dict()).ui
-    assert back.show_dialogue_log is False
-    win.cfg.ui.show_dialogue_log = True
-    assert Config.from_dict(win.cfg.to_dict()).ui.show_dialogue_log is True
-    assert Config().ui.show_dialogue_log is False
-
-
 def test_the_strip_shows_on_the_tracking_view(app):
     win = _ViewWindow()
-    _want(win, True)
+    MainWindow._apply_dialogue_visibility(win)
     assert win._shown()
 
 
 def test_the_strip_is_hidden_on_the_grimoire_view(app):
     """The Grimoire gets the whole pane; the transcript belongs to tracking."""
     win = _ViewWindow()
-    _want(win, True)
     _grimoire(win, True)
     assert not win._shown()
 
 
 def test_it_comes_back_when_returning_to_tracking(app):
     win = _ViewWindow()
-    _want(win, True)
     _grimoire(win, True)
     _grimoire(win, False)
     assert win._shown()
 
 
-def test_turning_it_on_while_on_the_grimoire_is_remembered(app):
-    """Toggling it on there should take effect on the way back, not immediately."""
+def test_the_strip_can_be_switched_off_and_it_is_remembered(app):
     win = _ViewWindow()
+    assert Config().ui.show_dialogue_strip is True
+    MainWindow._toggle_dialogue_strip(win, False)
+    assert not win._shown()
+    assert win.cfg.ui.show_dialogue_strip is False and win.saves
+    assert Config.from_dict(win.cfg.to_dict()).ui.show_dialogue_strip is False
+    MainWindow._toggle_dialogue_strip(win, True)
+    assert win._shown()
+
+
+def test_switching_it_on_while_on_the_grimoire_waits_for_tracking(app):
+    win = _ViewWindow()
+    MainWindow._toggle_dialogue_strip(win, False)
     _grimoire(win, True)
-    _want(win, True)
+    MainWindow._toggle_dialogue_strip(win, True)
     assert not win._shown()      # still the Grimoire view
     _grimoire(win, False)
     assert win._shown()          # honoured on return
 
 
-def test_turning_it_off_stays_off_across_a_view_switch(app):
+def test_switched_off_stays_off_across_a_view_switch(app):
     win = _ViewWindow()
-    _want(win, True)
-    _want(win, False)
+    MainWindow._toggle_dialogue_strip(win, False)
     _grimoire(win, True)
     _grimoire(win, False)
     assert not win._shown()
@@ -933,3 +922,121 @@ def test_term_chips_are_bold(app):
     from grimoireassist.terms import Term
     chip = MainWindow._term_chip(win, Term("Rathalos", "monster"))
     assert "font-weight:bold" in chip.styleSheet()
+
+
+# ------------------------------------------------- transcript and terms tabs
+class _PartsWindow(_ViewWindow):
+    """_ViewWindow plus the strip's two tabs, their pages and their extras."""
+
+    def __init__(self):
+        super().__init__()
+        from PyQt6.QtWidgets import QStackedWidget, QTabBar
+        parent = self._dialogue_widget
+        self._dialogue_tabs = QTabBar(parent)
+        self._dialogue_tabs.addTab("Dialogue")
+        self._dialogue_tabs.addTab("Terms")
+        self._dialogue_tabs.currentChanged.connect(
+            lambda i: MainWindow._on_dialogue_tab_changed(self, i))
+        self._dialogue_pages = QStackedWidget(parent)
+        self._dialogue_log = QWidget()
+        self._term_column = QWidget()
+        self._dialogue_pages.addWidget(self._dialogue_log)
+        self._dialogue_pages.addWidget(self._term_column)
+        self._dialogue_test_row = QWidget(parent)
+        self._dialogue_speech_btns = (QWidget(parent), QWidget(parent))
+        MainWindow._apply_dialogue_visibility(self)
+
+    def shown(self, w):
+        return w.isVisibleTo(self._dialogue_widget)
+
+    def page(self):
+        return self._dialogue_pages.currentWidget()
+
+
+def test_both_tabs_are_always_there_and_dialogue_comes_first(app):
+    win = _PartsWindow()
+    assert win._shown()
+    bar = win._dialogue_tabs
+    assert [bar.tabText(i) for i in range(bar.count()) if bar.isTabVisible(i)] \
+        == ["Dialogue", "Terms"]
+    assert win.page() is win._dialogue_log
+    assert win.shown(win._dialogue_test_row)
+    assert all(win.shown(b) for b in win._dialogue_speech_btns)
+
+
+def test_the_picked_tab_is_remembered_and_drives_the_controls(app):
+    win = _PartsWindow()
+    win._dialogue_tabs.setCurrentIndex(1)
+    assert win.cfg.ui.dialogue_tab == "terms" and win.saves
+    assert win.page() is win._term_column
+    # The speech controls and test box go with the Dialogue page.
+    assert not win.shown(win._dialogue_test_row)
+    assert not any(win.shown(b) for b in win._dialogue_speech_btns)
+    win._dialogue_tabs.setCurrentIndex(0)
+    assert win.cfg.ui.dialogue_tab == "dialogue"
+    assert win.shown(win._dialogue_test_row)
+
+
+def test_the_strip_opens_on_the_saved_tab(app):
+    win = _PartsWindow()
+    win.cfg.ui.dialogue_tab = "terms"
+    MainWindow._apply_dialogue_visibility(win)
+    assert win.page() is win._term_column
+    assert win._dialogue_tabs.currentIndex() == 1
+
+
+def test_dialogue_tab_round_trips_and_rejects_junk(app):
+    assert Config().ui.dialogue_tab == "dialogue"
+    assert Config.from_dict({"ui": {"dialogue_tab": "Terms"}}).ui.dialogue_tab == "terms"
+    assert Config.from_dict({"ui": {"dialogue_tab": "x"}}).ui.dialogue_tab == "dialogue"
+    cfg = Config()
+    cfg.ui.dialogue_tab = "terms"
+    cfg.ui.term_expiry_s = 30
+    back = Config.from_dict(cfg.to_dict()).ui
+    assert back.dialogue_tab == "terms" and back.term_expiry_s == 30
+
+
+def test_terms_also_stay_off_the_grimoire(app):
+    win = _PartsWindow()
+    win._dialogue_tabs.setCurrentIndex(1)
+    _grimoire(win, True)
+    assert not win._shown()
+
+
+def test_the_test_box_waits_for_the_dialogue_tab(app):
+    win = _PartsWindow()
+    win._dialogue_tabs.setCurrentIndex(1)
+    MainWindow._toggle_dialogue_test_box(win, True)
+    assert not win.shown(win._dialogue_test_row)
+
+
+def test_term_expiry_defaults_to_twelve_seconds_and_rejects_junk(app):
+    assert Config().ui.term_expiry_s == 12.0
+    assert Config.from_dict({"ui": {"term_expiry_s": "x"}}).ui.term_expiry_s == 12.0
+    assert Config.from_dict({"ui": {"term_expiry_s": -5}}).ui.term_expiry_s == 0.0
+
+
+def test_expired_terms_leave_the_chips(app):
+    from grimoireassist.terms import Term
+
+    class _Clock:
+        now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = _Clock()
+    win, _column = _term_column_window()
+    win._terms = TermLog(ttl=12, clock=clock)
+    win._terms.extend([Term("Rathalos", "monster")])
+    clock.now = 6
+    win._terms.extend([Term("Hinoa", "character")])
+    MainWindow._refresh_term_chips(win)
+    clock.now = 12
+    MainWindow._expire_terms(win)
+    chips = [win._term_chips_lay.itemAt(i).widget()
+             for i in range(win._term_chips_lay.count())]
+    assert [c.text() for c in chips if c is not win._term_placeholder] == ["Hinoa"]
+    clock.now = 18
+    MainWindow._expire_terms(win)
+    assert not win._term_placeholder.isHidden()     # back to the placeholder

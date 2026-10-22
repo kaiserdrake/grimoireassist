@@ -206,7 +206,6 @@ class _LayoutWindow:
         self._detections = []
         self.idle_started = 0
         self.overlay_syncs = 0
-        self._dialogue_wanted = True
         self._debug_widget = QWidget()
         self._debug_widget.setVisible(False)
         self._preview = _FakePreview()

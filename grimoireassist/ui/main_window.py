@@ -21,7 +21,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QStackedWidget, QTextEdit, QToolBar, QToolButton,
+    QSizePolicy, QSplitter, QStackedWidget, QTabBar, QTextEdit, QToolBar,
+    QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -48,6 +49,7 @@ from .import_wizard import ImportWizard
 from .controller_overlay import ControllerMapOverlay
 from .flow_layout import FlowLayout
 from .controllers import LAYOUTS, LAYOUT_ORDER
+from .minimap_view import MinimapView
 from .monster_panel import MonsterNav, MonsterPanel
 from . import pane_layout
 from .pane_layout import BROWSER, CLASSIC, GRIMOIRE, TRACKING
@@ -273,20 +275,21 @@ class MainWindow(QMainWindow):
         self._dialogue_selected: Optional[int] = None   # picked entry's sequence
         # Copyable terms: the chip strip's list, each transcript line's
         # highlighted spans by sequence, and the game's known names.
-        self._terms = TermLog()
+        # Each chip lasts term_expiry_s after it was last seen; seeing the term
+        # again starts its clock over. The timer sweeps the stale ones out.
+        self._terms = TermLog(ttl=cfg.ui.term_expiry_s)
+        self._term_timer = QTimer(self)
+        self._term_timer.setInterval(1000)
+        self._term_timer.timeout.connect(self._expire_terms)
+        if self._terms.ttl is not None:
+            self._term_timer.start()
         self._dialogue_spans: Dict[int, list] = {}
         self._lexicon = Lexicon()
         self._scan_thread = None
-        # What the user asked for, which is not the same as what is on screen:
-        # the strip belongs to the tracking view and stays hidden on the Grimoire.
-        self._dialogue_wanted = cfg.ui.show_dialogue_log
+        # The strip belongs to the tracking view and stays hidden on the
+        # Grimoire; _start_game applies that once there is a view.
         self._dialogue_widget = self._build_dialogue_panel()
         self._dialogue_widget.setVisible(False)
-        # The menu item was built unchecked, before the strip existed; point it
-        # at the stored state without re-entering its slot (_start_game applies it).
-        self.act_dialogue_log.blockSignals(True)
-        self.act_dialogue_log.setChecked(self._dialogue_wanted)
-        self.act_dialogue_log.blockSignals(False)
 
         # Three sections, two panes. Each section has a host that never
         # changes; a layout (see pane_layout) only moves the hosts between the
@@ -473,6 +476,7 @@ class MainWindow(QMainWindow):
         self.cfg.ocr.regions_battle_end = gs.battle_end
         self.cfg.ocr.regions_dialogue = gs.dialogue
         self.cfg.ocr.regions_labels = gs.labels
+        self.cfg.ocr.regions_minimap = gs.minimap
         self.cfg.ocr.keywords_battle_end = gs.end_keywords
         self.cfg.save()
         self.setWindowTitle(f"GrimoireAssist {__version__} — {game.name}")
@@ -495,7 +499,7 @@ class MainWindow(QMainWindow):
         wlay.setContentsMargins(0, 0, 0, 0)
         wlay.setSpacing(0)
         wlay.addWidget(self._dialogue_widget)
-        wlay.addWidget(self.panel, 1)
+        wlay.addWidget(self._build_tracking_tabs(), 1)
         wlay.addWidget(self._debug_widget)
         self._set_main_widget(wrapper)
         # The new panel brought its own Grimoire view; lend it out if the
@@ -514,6 +518,46 @@ class MainWindow(QMainWindow):
             self._start_worker()
         else:
             self._stop_worker()
+
+    # ================= Monster | Minimap tabs =================
+    def _build_tracking_tabs(self) -> QWidget:
+        """The tracking section's body: the monster panel, and the minimap
+        region shown enlarged, as two tabs. Rebuilt per game with the panel."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        tabs = QTabBar()
+        tabs.addTab("Monster")
+        tabs.addTab("Minimap")
+        tabs.setDrawBase(False)
+        tabs.setExpanding(False)
+        tabs.setStyleSheet(
+            "QTabBar { background:#15151b; }"
+            "QTabBar::tab { background:transparent; color:#9a9aa3; border:none;"
+            " border-bottom:2px solid transparent; padding:3px 12px;"
+            " font-size:11px; font-weight:600; }"
+            "QTabBar::tab:selected { color:#e8e8ec; border-bottom-color:#5b3fa6; }"
+            "QTabBar::tab:hover { color:#e8e8ec; }")
+        pages = QStackedWidget()
+        pages.addWidget(self.panel)
+        # The view polls frames only while its tab is showing.
+        self.minimap_view = MinimapView(self.buffer, lambda: self.cfg.ocr.regions_minimap)
+        pages.addWidget(self.minimap_view)
+        index = 1 if self.cfg.ui.tracking_tab == "minimap" else 0
+        tabs.setCurrentIndex(index)
+        pages.setCurrentIndex(index)
+        tabs.currentChanged.connect(pages.setCurrentIndex)
+        tabs.currentChanged.connect(self._on_tracking_tab_changed)
+        lay.addWidget(tabs)
+        lay.addWidget(pages, 1)
+        self._tracking_tabs = tabs
+        return box
+
+    def _on_tracking_tab_changed(self, index: int) -> None:
+        """The user picked the Monster or the Minimap tab."""
+        self.cfg.ui.tracking_tab = "minimap" if index == 1 else "monster"
+        self.cfg.save()
 
     def _set_main_widget(self, w: QWidget) -> None:
         """Swap the tracking section's content. The new wrapper has already
@@ -910,6 +954,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Game '{dlg.result_game.name}' added — use Switch game to select it.", 5000)
 
+    def _edit_game(self) -> None:
+        if not self.game:
+            self.statusBar().showMessage("No game selected to edit.", 4000)
+            return
+        from .add_game_dialog import AddGameDialog
+        dlg = AddGameDialog(self.cfg._path, parent=self, game=self.game)
+        if dlg.exec() and dlg.result_game:
+            # Restart the game so the panel picks up the new URL/layout.
+            self._start_game(dlg.result_game)
+            self.statusBar().showMessage(
+                f"Game '{dlg.result_game.name}' updated.", 4000)
+
     def _switch_game(self) -> None:
         dlg = GameSelectDialog(list(load_catalog(self.cfg._path)),
                                current=self.cfg.selected_game, parent=self)
@@ -961,6 +1017,13 @@ class MainWindow(QMainWindow):
 
         self.menu = QMenu(self)
 
+        # ── Game ─────────────────────────────────────────────────
+        menu_game = self.menu.addMenu("🎲  Game")
+        menu_game.addAction("Add game…", self._add_game)
+        menu_game.addAction("Edit current game…", self._edit_game)
+        menu_game.addAction("Switch game…", self._switch_game)
+        menu_game.addAction("Import monster data…", self._open_import_wizard)
+
         # ── Camera ──────────────────────────────────────────────
         menu_camera = self.menu.addMenu("📷  Camera")
         self.camera_menu = menu_camera.addMenu("Select source…")
@@ -1005,10 +1068,12 @@ class MainWindow(QMainWindow):
         # Text read off the screen: the dialogue log and the copyable terms
         # in it. Not under Speech — the terms are wanted with the voice off.
         text_menu = menu_ocr.addMenu("Text")
-        self.act_dialogue_log = text_menu.addAction("Show dialogue log")
-        self.act_dialogue_log.setCheckable(True)
-        self.act_dialogue_log.setChecked(False)
-        self.act_dialogue_log.toggled.connect(self._toggle_dialogue_panel)
+        self.act_dialogue_strip = text_menu.addAction("Show Dialogue/Terms")
+        self.act_dialogue_strip.setCheckable(True)
+        self.act_dialogue_strip.setChecked(self.cfg.ui.show_dialogue_strip)
+        self.act_dialogue_strip.setToolTip(
+            "The tabbed strip above the cards: the transcript and the terms read off the screen")
+        self.act_dialogue_strip.toggled.connect(self._toggle_dialogue_strip)
         self.act_test_box = text_menu.addAction("Show test line box")
         self.act_test_box.setCheckable(True)
         self.act_test_box.setChecked(self.cfg.ui.dialogue_test_box)
@@ -1065,27 +1130,6 @@ class MainWindow(QMainWindow):
             rate_menu.addAction(act)
         menu_speech.addAction("Test voice", self._test_voice)
 
-        # ── Game ─────────────────────────────────────────────────
-        menu_game = self.menu.addMenu("🎲  Game")
-        menu_game.addAction("Add game…", self._add_game)
-        menu_game.addAction("Switch game…", self._switch_game)
-        menu_game.addAction("Import monster data…", self._open_import_wizard)
-
-        # ── Browser ──────────────────────────────────────────────
-        menu_browser = self.menu.addMenu("🌐  Browser")
-        engine_menu = menu_browser.addMenu("Search engine")
-        engine_group = QActionGroup(engine_menu)
-        engine_group.setExclusive(True)
-        current_engine = getattr(self.cfg.ui, "search_engine", "google")
-        for key, (label, _tmpl) in SEARCH_ENGINES.items():
-            act = QAction(label, engine_menu)
-            act.setCheckable(True)
-            act.setChecked(current_engine == key)
-            act.triggered.connect(lambda _c, k=key: self.browser.set_search_engine(k))
-            engine_group.addAction(act)
-            engine_menu.addAction(act)
-        menu_browser.addAction("Grimoire user…", self._set_grimoire_user)
-
         # ── Window ───────────────────────────────────────────────
         menu_window = self.menu.addMenu("🪟  Window")
         self.act_on_top = menu_window.addAction("Always on top")
@@ -1110,10 +1154,13 @@ class MainWindow(QMainWindow):
             layout_menu.addAction(act)
             self._layout_actions[key] = act
 
-        # ── Overlays ─────────────────────────────────────────────
+        # The app's parts that float over or sit beside the main pane.
+        menu_components = menu_window.addMenu("Components")
+
+        # ── Window → Components → Overlays ────────────────────────
         # The two things that float over the main pane, and whether they do it
         # as one panel or two.
-        menu_overlays = self.menu.addMenu("🖼  Overlays")
+        menu_overlays = menu_components.addMenu("🖼  Overlays")
         # Starts unchecked because the preview widget doesn't exist yet when the
         # menu is built; __init__ re-checks it from config after creating it.
         self.act_preview = menu_overlays.addAction("Input preview")
@@ -1148,6 +1195,21 @@ class MainWindow(QMainWindow):
                     lambda _c, s=side, p=pad_id: self._set_controller_pad(s, p))
                 group.addAction(act)
                 side_menu.addAction(act)
+
+        # ── Window → Components → Browser ─────────────────────────
+        menu_browser = menu_components.addMenu("🌐  Browser")
+        engine_menu = menu_browser.addMenu("Search engine")
+        engine_group = QActionGroup(engine_menu)
+        engine_group.setExclusive(True)
+        current_engine = getattr(self.cfg.ui, "search_engine", "google")
+        for key, (label, _tmpl) in SEARCH_ENGINES.items():
+            act = QAction(label, engine_menu)
+            act.setCheckable(True)
+            act.setChecked(current_engine == key)
+            act.triggered.connect(lambda _c, k=key: self.browser.set_search_engine(k))
+            engine_group.addAction(act)
+            engine_menu.addAction(act)
+        menu_browser.addAction("Grimoire user…", self._set_grimoire_user)
 
         # ── Debug ────────────────────────────────────────────────
         menu_debug = self.menu.addMenu("🐞  Debug")
@@ -1466,9 +1528,25 @@ class MainWindow(QMainWindow):
         row = QWidget()
         rlay = QHBoxLayout(row)
         rlay.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel("Dialogue")
-        lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:600;")
-        rlay.addWidget(lbl)
+        # The transcript and the terms share the strip as two tabs; the tab
+        # bar is the strip's title and stays up when the body is folded.
+        tabs = QTabBar()
+        tabs.addTab("Dialogue")
+        tabs.addTab("Terms")
+        tabs.setDrawBase(False)
+        tabs.setExpanding(False)
+        tabs.setStyleSheet(
+            "QTabBar::tab { background:transparent; color:#9a9aa3; border:none;"
+            " border-bottom:2px solid transparent; padding:2px 10px;"
+            " font-size:11px; font-weight:600; }"
+            "QTabBar::tab:selected { color:#e8e8ec; border-bottom-color:#5b3fa6; }"
+            "QTabBar::tab:hover { color:#e8e8ec; }")
+        tabs.setCurrentIndex(1 if self.cfg.ui.dialogue_tab == "terms" else 0)
+        tabs.currentChanged.connect(self._on_dialogue_tab_changed)
+        # A tab clicked on a folded strip unfolds it to that page.
+        tabs.tabBarClicked.connect(lambda _i: self._set_dialogue_collapsed(False))
+        rlay.addWidget(tabs)
+        self._dialogue_tabs = tabs
         self._dialogue_backend_lbl = QLabel("")
         self._dialogue_backend_lbl.setStyleSheet("color:#5a5a6a; font-size:10px;")
         rlay.addWidget(self._dialogue_backend_lbl)
@@ -1505,6 +1583,8 @@ class MainWindow(QMainWindow):
         self.mute_btn.toggled.connect(self._set_muted)
         self._update_mute_btn()
         rlay.addWidget(self.mute_btn)
+        # Only meaningful next to the transcript; hidden with it.
+        self._dialogue_speech_btns = (self.stop_btn, self.replay_btn, self.mute_btn)
         clear_btn = QPushButton("Clear")
         clear_btn.setFixedWidth(54)
         clear_btn.setStyleSheet(_btn_style)
@@ -1535,8 +1615,6 @@ class MainWindow(QMainWindow):
         self._dialogue_log.setStyleSheet(
             "QTextEdit { background:%s; color:%s;"
             " border:none; }" % (_TRACKING_BG, _TRACKING_FG))
-        self._dialogue_log.setFixedHeight(
-            min(max(self.cfg.ui.dialogue_height, _DIALOGUE_MIN_H), _DIALOGUE_MAX_H))
         self._dialogue_log.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.LinksAccessibleByMouse)
@@ -1546,16 +1624,17 @@ class MainWindow(QMainWindow):
         self._dialogue_log.term_menu.connect(self._show_term_menu)
         clear_btn.clicked.connect(self._clear_dialogue_log)
 
-        # Two columns: the transcript on the left, the terms found in it on
-        # the right. The log's fixed height sets the row; the terms column
-        # fills it and scrolls, so the grip resizes both together.
-        columns = QWidget()
-        clay = QHBoxLayout(columns)
-        clay.setContentsMargins(0, 0, 0, 0)
-        clay.setSpacing(10)
-        clay.addWidget(self._dialogue_log, 3)
-        clay.addWidget(self._build_term_column(), 2)
-        blay.addWidget(columns)
+        # One page per tab, in tab order. The stack has the fixed height, so
+        # the grip resizes both pages together.
+        pages = QStackedWidget()
+        pages.setFixedHeight(
+            min(max(self.cfg.ui.dialogue_height, _DIALOGUE_MIN_H), _DIALOGUE_MAX_H))
+        pages.addWidget(self._dialogue_log)
+        self._term_column = self._build_term_column()
+        pages.addWidget(self._term_column)
+        pages.setCurrentIndex(tabs.currentIndex())
+        self._dialogue_pages = pages
+        blay.addWidget(pages)
 
         # ── Type a line and hear it ─────────────────────────────────────
         # The counterpart to the debug panel's "Test OCR" box: narration can be
@@ -1581,10 +1660,10 @@ class MainWindow(QMainWindow):
         speak_btn.clicked.connect(self._inject_dialogue)
         tlay.addWidget(speak_btn)
         self._dialogue_test_row = test_row
-        test_row.setVisible(self.cfg.ui.dialogue_test_box)
+        test_row.setVisible(self.cfg.ui.dialogue_test_box and tabs.currentIndex() == 0)
         blay.addWidget(test_row)
 
-        grip = _DialogueGrip(self._dialogue_log)
+        grip = _DialogueGrip(pages)
         grip.committed.connect(self._on_dialogue_resized)
         blay.addWidget(grip)
 
@@ -1931,7 +2010,7 @@ class MainWindow(QMainWindow):
         self._refresh_term_chips()
 
     def _build_term_column(self) -> QWidget:
-        """The terms column beside the transcript: recent terms, newest first,
+        """The Terms tab's page: recent terms, newest first,
         as chips that wrap onto new rows and scroll; click to copy. "All"
         lists everything past the chips shown."""
         col = QWidget()
@@ -1941,16 +2020,15 @@ class MainWindow(QMainWindow):
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel("Terms")
-        lbl.setStyleSheet("color:#9a9aa3; font-size:11px; font-weight:bold;")
-        head.addWidget(lbl)
         head.addStretch()
         self._term_all_btn = QPushButton("All")
         self._term_all_btn.setStyleSheet(
             "QPushButton { background:#2a2a36; color:#9a9aa3; border:none;"
             " border-radius:3px; padding:2px 6px; font-size:11px; }"
             "QPushButton:hover { background:#3a3a50; }")
-        self._term_all_btn.setToolTip("Every term seen this session")
+        self._term_all_btn.setToolTip(
+            "Every term still on the list (a term goes once it hasn't been seen"
+            " for a while)")
         self._term_all_btn.clicked.connect(self._show_all_terms)
         self._term_all_btn.setVisible(False)
         head.addWidget(self._term_all_btn)
@@ -1966,7 +2044,7 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Never taller than the transcript beside it: the log sets the height.
+        # Never taller than the page: the strip's height is set on the stack.
         scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         lay.addWidget(scroll, 1)
         return col
@@ -2078,10 +2156,13 @@ class MainWindow(QMainWindow):
             return
         self._terms.extend(terms)
         self._refresh_term_chips()
+        # The scan was asked for to copy what it found, so bring up its tab.
+        tabs = getattr(self, "_dialogue_tabs", None)
+        if tabs is not None:
+            tabs.setCurrentIndex(1)
         names = ", ".join(t.text for t in terms[:6])
         more = f" (+{len(terms) - 6} more)" if len(terms) > 6 else ""
-        where = "" if self._dialogue_wanted else " — open the Dialogue panel to copy them"
-        self.statusBar().showMessage(f"Found {len(terms)}: {names}{more}{where}", 8000)
+        self.statusBar().showMessage(f"Found {len(terms)}: {names}{more}", 8000)
 
     def _select_dialogue_entry(self, seq: int) -> None:
         """Pick a line (or unpick it, if it was already the picked one)."""
@@ -2261,22 +2342,46 @@ class MainWindow(QMainWindow):
         if self.speaker is not None:
             self.speaker.flush()
 
-    def _toggle_dialogue_panel(self, visible: bool) -> None:
-        self._dialogue_wanted = bool(visible)
-        self.cfg.ui.show_dialogue_log = self._dialogue_wanted
-        self.cfg.save()
-        self._apply_dialogue_visibility()
+    def _expire_terms(self) -> None:
+        """Timer: drop chips not seen for term_expiry_s."""
+        if self._terms.expire():
+            self._refresh_term_chips()
 
     def _apply_dialogue_visibility(self) -> None:
-        """Show the strip only on the tracking view, and only if it was asked for.
+        """Show the strip on the tracking view only, and only if it's wanted.
 
         Unlike the PiP — a camera monitor that deliberately floats over both
         views — the transcript is part of the tracking surface, so the Grimoire
-        gets the whole pane. Toggling it on while the Grimoire is up is
+        gets the whole pane. Switching it on while the Grimoire is up is
         remembered and takes effect on the way back."""
         self._dialogue_widget.setVisible(
-            self._dialogue_wanted and not self._grimoire_shown)
+            self.cfg.ui.show_dialogue_strip and not self._grimoire_shown)
+        # Which tab is up. Absent on the test stand-ins.
+        tabs = getattr(self, "_dialogue_tabs", None)
+        if tabs is not None:
+            page = 1 if self.cfg.ui.dialogue_tab == "terms" else 0
+            tabs.blockSignals(True)
+            tabs.setCurrentIndex(page)
+            tabs.blockSignals(False)
+            self._dialogue_pages.setCurrentIndex(page)
+            # The speech controls and the test box belong to the transcript.
+            self._dialogue_test_row.setVisible(
+                page == 0 and self.cfg.ui.dialogue_test_box)
+            for btn in self._dialogue_speech_btns:
+                btn.setVisible(page == 0)
         self._sync_preview_inset()
+
+    def _toggle_dialogue_strip(self, visible: bool) -> None:
+        """Menu: show or hide the Dialogue/Terms strip."""
+        self.cfg.ui.show_dialogue_strip = bool(visible)
+        self.cfg.save()
+        self._apply_dialogue_visibility()
+
+    def _on_dialogue_tab_changed(self, index: int) -> None:
+        """The user picked the Dialogue or the Terms tab."""
+        self.cfg.ui.dialogue_tab = "terms" if index == 1 else "dialogue"
+        self.cfg.save()
+        self._apply_dialogue_visibility()
 
     def _on_dialogue_resized(self, height: int) -> None:
         """Persist a drag-resize of the transcript (once, on mouse release)."""
@@ -2287,7 +2392,10 @@ class MainWindow(QMainWindow):
         """Show or hide the type-a-line box; the transcript itself is unaffected."""
         self.cfg.ui.dialogue_test_box = bool(visible)
         self.cfg.save()
-        self._dialogue_test_row.setVisible(bool(visible))
+        # The box belongs to the Dialogue tab; it stays hidden on Terms.
+        tabs = getattr(self, "_dialogue_tabs", None)
+        self._dialogue_test_row.setVisible(
+            bool(visible) and (tabs is None or tabs.currentIndex() == 0))
 
     def _set_dialogue_collapsed(self, collapsed: bool) -> None:
         """Fold the strip down to its header, or unfold it again."""
@@ -2622,6 +2730,7 @@ class MainWindow(QMainWindow):
                     battle_end=self.cfg.ocr.regions_battle_end,
                     dialogue=self.cfg.ocr.regions_dialogue,
                     labels=self.cfg.ocr.regions_labels,
+                    minimap=self.cfg.ocr.regions_minimap,
                     end_keywords=self.cfg.ocr.keywords_battle_end,
                 )
                 self.cfg.set_regions_for(self.cfg.selected_game, gs)

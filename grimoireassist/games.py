@@ -89,10 +89,15 @@ def save_game(game: GameInfo, config_path) -> None:
         "notes_url": game.notes_url,
         "cards_per_row": game.cards_per_row,
     }
-    # Replace existing entry with same id, or append
-    updated = [e for e in existing if e.get("id") != game.id]
-    updated.append(entry)
-    gf.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Update an existing entry in place (keeping its position, which decides
+    # the default game, and any hand-added keys), or append a new one.
+    for i, e in enumerate(existing):
+        if e.get("id") == game.id:
+            existing[i] = {**e, **entry}
+            break
+    else:
+        existing.append(entry)
+    gf.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ── Monster names (import data only) ──────────────────────────────────────────

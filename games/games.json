@@ -18,5 +18,15 @@
     "requires_login": false,
     "notes_url": "",
     "cards_per_row": 4
+  },
+  {
+    "id": "ffresonance",
+    "name": "Final Fantasy Resonance",
+    "site_url_template": "https://grimoire.laeradsphere.com/api/note-files/21/raw",
+    "url_style": "search",
+    "multi_joiner": " || ",
+    "requires_login": true,
+    "notes_url": "https://grimoire.laeradsphere.com/",
+    "cards_per_row": 4
   }
 ]

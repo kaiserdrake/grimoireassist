@@ -21,7 +21,7 @@ MONSTER = "monster"
 LABELS = "labels"
 MAX_MONSTERS = 3
 MAX_LABELS = 4
-_SINGLE_NAMES = {"battle_end": "Battle end", "dialogue": "Dialogue"}
+_SINGLE_NAMES = {"battle_end": "Battle end", "dialogue": "Dialogue", "minimap": "Minimap"}
 _MULTI_NAMES = {MONSTER: "Monster", LABELS: "Labels"}
 
 
@@ -238,6 +238,7 @@ class CalibrateDialog(QDialog):
         regions["dialogue"] = Region(**vars(cfg.ocr.regions_dialogue))
         for i in range(MAX_LABELS):
             regions[f"{LABELS}_{i + 1}"] = labels[i] if i < len(labels) else Region()
+        regions["minimap"] = Region(**vars(cfg.ocr.regions_minimap))
         self.canvas.set_regions(regions)
 
         self.region_picker = QComboBox()
@@ -321,6 +322,7 @@ class CalibrateDialog(QDialog):
         self.cfg.ocr.regions_battle_end = r.get("battle_end", Region())
         self.cfg.ocr.regions_dialogue = r.get("dialogue", Region())
         self.cfg.ocr.regions_labels = labels
+        self.cfg.ocr.regions_minimap = r.get("minimap", Region())
         self.cfg.ocr.keywords_battle_end = [
             s.strip() for s in self.end_text_edit.text().split(",") if s.strip()
         ]
