@@ -48,6 +48,14 @@ def _non_negative(value, default: float) -> float:
         return default
 
 
+def _term_expiry(value) -> float:
+    """Term chip lifetime in seconds. 12 was the old default and cleared the
+    chips too soon; a config that still carries it moves to the new 5 minutes."""
+    if value is None or value == 12.0:
+        return 300.0
+    return _non_negative(value, 300.0)
+
+
 def _pane_layout(value) -> str:
     """Which section the window pins to the left; unknown names fall back."""
     from .ui.pane_layout import normalize
@@ -200,7 +208,7 @@ class UiConfig:
     tracking_tab: str = "monster"       # tracking section tab: "monster" or "minimap"
     dialogue_test_box: bool = True      # the type-a-line box inside the dialogue log
     dialogue_height: int = 132          # transcript height in px; drag its bottom grip
-    term_expiry_s: float = 12.0         # a term chip goes this long after it was last
+    term_expiry_s: float = 300.0        # a term chip goes this long after it was last
                                         # seen; seeing it again restarts it (0 = never)
 
 
@@ -501,7 +509,7 @@ class Config:
                 tracking_tab=_tracking_tab(ui.get("tracking_tab")),
                 dialogue_test_box=bool(ui.get("dialogue_test_box", True)),
                 dialogue_height=max(1, int(ui.get("dialogue_height", 132))),
-                term_expiry_s=_non_negative(ui.get("term_expiry_s", 12.0), 12.0),
+                term_expiry_s=_term_expiry(ui.get("term_expiry_s")),
             ),
             review=ReviewConfig(
                 enabled=bool(rev.get("enabled", True)),

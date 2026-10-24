@@ -1010,10 +1010,16 @@ def test_the_test_box_waits_for_the_dialogue_tab(app):
     assert not win.shown(win._dialogue_test_row)
 
 
-def test_term_expiry_defaults_to_twelve_seconds_and_rejects_junk(app):
-    assert Config().ui.term_expiry_s == 12.0
-    assert Config.from_dict({"ui": {"term_expiry_s": "x"}}).ui.term_expiry_s == 12.0
+def test_term_expiry_defaults_to_five_minutes_and_rejects_junk(app):
+    assert Config().ui.term_expiry_s == 300.0
+    assert Config.from_dict({"ui": {}}).ui.term_expiry_s == 300.0
+    assert Config.from_dict({"ui": {"term_expiry_s": "x"}}).ui.term_expiry_s == 300.0
     assert Config.from_dict({"ui": {"term_expiry_s": -5}}).ui.term_expiry_s == 0.0
+    assert Config.from_dict({"ui": {"term_expiry_s": 60}}).ui.term_expiry_s == 60.0
+
+
+def test_old_twelve_second_term_expiry_migrates_to_five_minutes(app):
+    assert Config.from_dict({"ui": {"term_expiry_s": 12.0}}).ui.term_expiry_s == 300.0
 
 
 def test_expired_terms_leave_the_chips(app):

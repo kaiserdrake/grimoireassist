@@ -44,7 +44,7 @@ try:
 except Exception:  # pragma: no cover - WebEngine missing
     _HAVE_WEBENGINE = False
 
-from .monster_panel import _inject_clipboard_fix
+from .monster_panel import _inject_clipboard_fix, _setup_page_permissions
 
 _BROWSER_PROFILE_NAME = "browser_persistent"
 
@@ -350,35 +350,11 @@ class BrowserPanel(QWidget):
         view.setPage(QWebEnginePage(self._profile, view))
         page = view.page()
         _inject_clipboard_fix(page)
-        try:
-            from PyQt6.QtWebEngineCore import QWebEngineSettings
-            page.settings().setAttribute(
-                QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
-        except Exception:
-            pass
-        try:
-            page.featurePermissionRequested.connect(
-                lambda origin, feature, p=page:
-                    self._grant_permission(p, origin, feature))
-        except Exception:
-            pass
+        _setup_page_permissions(page)
         view.titleChanged.connect(lambda t, v=view: self._on_title_changed(v, t))
         view.iconChanged.connect(lambda i, v=view: self._on_icon_changed(v, i))
         view.urlChanged.connect(lambda u, v=view: self._on_url_changed(v, u))
         return view
-
-    def _grant_permission(self, page, origin, feature) -> None:
-        F = QWebEnginePage.Feature
-        granted = {F.MediaVideoCapture, F.MediaAudioCapture,
-                   F.MediaAudioVideoCapture}
-        try:
-            granted.add(F.ClipboardReadWrite)
-        except AttributeError:
-            pass  # Qt < 6.2
-        policy = (QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-                  if feature in granted
-                  else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
-        page.setFeaturePermission(origin, feature, policy)
 
     # ── per-view signals ────────────────────────────────────────────────
     def _on_title_changed(self, view, title: str) -> None:

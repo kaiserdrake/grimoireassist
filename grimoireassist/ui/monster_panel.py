@@ -92,12 +92,18 @@ def shared_grimoire_profile() -> "QWebEngineProfile":
 
 def _inject_clipboard_fix(page) -> None:
     """Patch navigator.clipboard.writeText so it falls back to execCommand when
-    the Chromium clipboard IPC is blocked inside Qt WebEngine."""
+    the Chromium clipboard IPC is blocked inside Qt WebEngine.
+
+    The patch wraps the method on Clipboard.prototype in place. Replacing
+    navigator.clipboard with a copied object would drop the prototype methods
+    (readText, read, write). Pages would then see no readable clipboard and
+    keep their paste controls hidden."""
     from PyQt6.QtWebEngineCore import QWebEngineScript
     js = """
 (function () {
   if (window.__gaClipboardPatched) return;
   window.__gaClipboardPatched = true;
+  if (typeof Clipboard === 'undefined' || !Clipboard.prototype.writeText) return;
 
   function _execCopy(text) {
     var ta = document.createElement('textarea');
@@ -111,16 +117,12 @@ def _inject_clipboard_fix(page) -> None:
     return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
   }
 
-  var _orig = (navigator.clipboard || {}).writeText;
-  Object.defineProperty(navigator, 'clipboard', {
-    value: Object.assign({}, navigator.clipboard, {
-      writeText: function (text) {
-        var p = _orig ? _orig.call(navigator.clipboard, text) : Promise.reject();
-        return p.catch(function () { return _execCopy(text); });
-      }
-    }),
-    configurable: true, writable: false
-  });
+  var _orig = Clipboard.prototype.writeText;
+  Clipboard.prototype.writeText = function (text) {
+    var p;
+    try { p = _orig.call(this, text); } catch (e) { p = Promise.reject(e); }
+    return p.catch(function () { return _execCopy(text); });
+  };
 })();
 """
     script = QWebEngineScript()
@@ -130,6 +132,54 @@ def _inject_clipboard_fix(page) -> None:
     script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
     script.setRunsOnSubFrames(False)
     page.scripts().insert(script)
+
+
+def _setup_page_permissions(page) -> None:
+    """Let pages read and write the system clipboard and use camera/mic.
+
+    WebEngine grants clipboard read only when JavascriptCanAccessClipboard and
+    JavascriptCanPaste are both on. Other requests are answered through
+    permissionRequested on Qt 6.8+ and featurePermissionRequested on older Qt."""
+    try:
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        A = QWebEngineSettings.WebAttribute
+        page.settings().setAttribute(A.JavascriptCanAccessClipboard, True)
+        page.settings().setAttribute(A.JavascriptCanPaste, True)
+    except Exception:
+        pass
+    try:
+        from PyQt6.QtWebEngineCore import QWebEnginePermission
+        T = QWebEnginePermission.PermissionType
+        allowed = {T.ClipboardReadWrite, T.MediaVideoCapture,
+                   T.MediaAudioCapture, T.MediaAudioVideoCapture}
+
+        def _on_permission(permission):
+            if permission.permissionType() in allowed:
+                permission.grant()
+            else:
+                permission.deny()
+        page.permissionRequested.connect(_on_permission)
+        return
+    except (ImportError, AttributeError):
+        pass  # Qt < 6.8: the feature-based API below
+    try:
+        page.featurePermissionRequested.connect(
+            lambda origin, feature, p=page: _grant_feature(p, origin, feature))
+    except Exception:
+        pass
+
+
+def _grant_feature(page, origin, feature) -> None:
+    F = QWebEnginePage.Feature
+    granted = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
+    try:
+        granted.add(F.ClipboardReadWrite)
+    except AttributeError:
+        pass  # Qt < 6.2
+    policy = (QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+              if feature in granted
+              else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
+    page.setFeaturePermission(origin, feature, policy)
 
 
 def _inject_rotate_fix(page) -> None:
@@ -386,35 +436,8 @@ class MonsterPanel(QWidget):
         if grimoire_fix:
             _inject_rotate_fix(page)
         _inject_clipboard_fix(page)
-
-        # Allow JS clipboard access (navigator.clipboard API + execCommand fallback)
-        try:
-            from PyQt6.QtWebEngineCore import QWebEngineSettings
-            page.settings().setAttribute(
-                QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
-        except Exception:
-            pass
-
-        try:
-            page.featurePermissionRequested.connect(
-                lambda origin, feature, p=page: self._grant_permission(p, origin, feature))
-        except Exception:
-            pass
+        _setup_page_permissions(page)
         return view
-
-    # -- permissions -----------------------------------------------------
-    def _grant_permission(self, page, origin, feature) -> None:
-        F = QWebEnginePage.Feature
-        # Build the set of features we grant; ClipboardReadWrite added when available
-        granted = {F.MediaVideoCapture, F.MediaAudioCapture, F.MediaAudioVideoCapture}
-        try:
-            granted.add(F.ClipboardReadWrite)
-        except AttributeError:
-            pass  # Qt < 6.2
-        policy = (QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-                  if feature in granted
-                  else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser)
-        page.setFeaturePermission(origin, feature, policy)
 
     # -- grimoire toggle (called by MainWindow toolbar button) -----------
     def set_grimoire_visible(self, visible: bool) -> None:
